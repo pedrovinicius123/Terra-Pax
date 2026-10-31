@@ -1,115 +1,103 @@
 import networkx as nx
-import string
 import random
 import math
-import pygame
 
 from graphics.star import Planet, Star
 
 
 def generate_traditional_star_name():
-    """Generate names in the astronomical traditional catalogue"""
-    
-    # Common Catalogue
-    catalogue = [
-        "HD", "HIP", "HR", "GJ", "BD", "CD", "CPD", 
-        "TYC", "2MASS", "WISE", "GSC", "SAO"
-    ]
-    
-    # Greek letters for bright stars
-    greek = [
-        "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", 
-        "Eta", "Theta", "Iota", "Kappa", "Lambda", "Mu", 
-        "Nu", "Xi", "Omicron", "Pi", "Rho", "Sigma", 
-        "Tau", "Upsilon", "Phi", "Chi", "Psi", "Omega"
-    ]
-
-    # constelations
+    catalogue = ["HD", "HIP", "HR", "GJ", "BD", "CD", "CPD",
+                 "TYC", "2MASS", "WISE", "GSC", "SAO"]
+    greek = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta",
+             "Eta", "Theta", "Iota", "Kappa", "Lambda", "Mu",
+             "Nu", "Xi", "Omicron", "Pi", "Rho", "Sigma",
+             "Tau", "Upsilon", "Phi", "Chi", "Psi", "Omega"]
     constelations = [
-        "Andromedae", "Antliae", "Apodis", "Aquarii", "Aquilae", 
-        "Arae", "Arietis", "Aurigae", "Bootis", "Caeli", 
-        "Camelopardalis", "Cancri", "Canum Venaticorum", "Canis Majoris", 
-        "Canis Minoris", "Capricorni", "Carinae", "Cassiopeiae", 
-        "Centauri", "Cephei", "Ceti", "Chamaeleontis", "Circini", 
-        "Columbae", "Comae Berenices", "Coronae Australis", "Coronae Borealis", 
-        "Corvi", "Crateris", "Crucis", "Cygni", "Delphini", 
-        "Doradus", "Draconis", "Equulei", "Eridani", "Fornacis", 
-        "Geminorum", "Gruis", "Herculis", "Horologii", "Hydrae", 
-        "Hydri", "Indi", "Lacertae", "Leonis", "Leonis Minoris", 
-        "Leporis", "Librae", "Lupi", "Lyncis", "Lyrae", 
-        "Mensae", "Microscopii", "Monocerotis", "Muscae", "Normae", 
-        "Octantis", "Ophiuchi", "Orionis", "Pavonis", "Pegasi", 
-        "Persei", "Phoenicis", "Pictoris", "Piscium", "Piscis Austrini", 
-        "Puppis", "Pyxidis", "Reticuli", "Sagittarii", "Scorpii", 
-        "Sculptoris", "Scuti", "Serpentis", "Sextantis", "Tauri", 
-        "Telescopii", "Trianguli", "Trianguli Australis", "Tucanae", 
-        "Ursae Majoris", "Ursae Minoris", "Velorum", "Virginis", 
-        "Volantis", "Vulpeculae"
+        "Andromedae", "Antliae", "Apodis", "Aquarii", "Aquilae", "Arae",
+        "Arietis", "Aurigae", "Bootis", "Caeli", "Camelopardalis", "Cancri",
+        "Canum Venaticorum", "Canis Majoris", "Canis Minoris", "Capricorni",
+        "Carinae", "Cassiopeiae", "Centauri", "Cephei", "Ceti",
+        "Chamaeleontis", "Circini", "Columbae", "Comae Berenices",
+        "Coronae Australis", "Coronae Borealis", "Corvi", "Crateris",
+        "Crucis", "Cygni", "Delphini", "Doradus", "Draconis", "Equulei",
+        "Eridani", "Fornacis", "Geminorum", "Gruis", "Herculis",
+        "Horologii", "Hydrae", "Hydri", "Indi", "Lacertae", "Leonis",
+        "Leonis Minoris", "Leporis", "Librae", "Lupi", "Lyncis", "Lyrae",
+        "Mensae", "Microscopii", "Monocerotis", "Muscae", "Normae",
+        "Octantis", "Ophiuchi", "Orionis", "Pavonis", "Pegasi", "Persei",
+        "Phoenicis", "Pictoris", "Piscium", "Piscis Austrini", "Puppis",
+        "Pyxidis", "Reticuli", "Sagittarii", "Scorpii", "Sculptoris",
+        "Scuti", "Serpentis", "Sextantis", "Tauri", "Telescopii",
+        "Trianguli", "Trianguli Australis", "Tucanae", "Ursae Majoris",
+        "Ursae Minoris", "Velorum", "Virginis", "Volantis", "Vulpeculae",
     ]
-    
-    # Chose an random method
     method = random.choice(["catalogue", "greek", "number"])
-    
     if method == "catalogue":
-        catalogue = random.choice(catalogue)
-        number = random.randint(1, 999999)
-        return f"{catalogue} {number}"
-    
-    elif method == "greek":
-        letter = random.choice(greek)
-        constelation = random.choice(constelations)
-        return f"{letter} {constelation}"
-    
-    else:  # number
-        constelation = random.choice(constelations)
-        number = random.randint(1, 300)
-        return f"{number} {constelation}"
+        return f"{random.choice(catalogue)} {random.randint(1, 999999)}"
+    if method == "greek":
+        return f"{random.choice(greek)} {random.choice(constelations)}"
+    return f"{random.randint(1, 300)} {random.choice(constelations)}"
 
 
-
-def init_map(n_stars:int, sector_size:int, min_dist:int):
+def init_map(n_stars: int, sector_size: int, min_dist: int):
     stars = []
-    for i in range(n_stars):
-        random_position = [random.uniform(0, sector_size), random.uniform(0, sector_size)]
-        random_planet_position_x = random.uniform(0,1)
-        random_planet_position_y = random.uniform(0,1)
-        star_radius = random.uniform(0.03, 0.05)
+    planet_letters = "bcdefghi"
 
-        stars.append(
-            Star(
+    for _ in range(n_stars):
+        pos = [random.uniform(0, sector_size), random.uniform(0, sector_size)]
+
+        # Realista: estrela ~10x o raio de um planeta; sistema compacto.
+        star_r = random.uniform(0.007, 0.011) * sector_size   # 10.5–16.5 u
+        planet_r = random.uniform(0.0015, 0.0030) * sector_size  # 2.25–4.5 u
+
+        star = Star(
             name=generate_traditional_star_name(),
-            total_resources = random.uniform(1e4, 1e6),
-            radius=star_radius,
-            green_zone = random.uniform(1, 2)*star_radius,
-            position = random_position,
-            #faction='',
-            planets=[])
+            total_resources=random.uniform(1e4, 1e6),
+            radius=star_r,
+            green_zone=random.uniform(1, 2) * star_r,
+            position=pos,
+            planets=[],
         )
+        stars.append(star)
 
-        for i in range(random.randint(1, 10)):
+        # Órbitas compactas, em camadas: base + k * passo
+        n_planets = random.randint(1, 8)
+        base_orbit = star_r * 1.5
+        orbit_step = star_r * 0.40
+
+        for k in range(n_planets):
+            dist = base_orbit + k * orbit_step
+            angle = random.uniform(0, 2 * math.pi)
+            px = pos[0] + dist * math.cos(angle)
+            py = pos[1] + dist * math.sin(angle)
+
             p = Planet(
                 n_planet_resources=0,
-                abs_position=(random_position[0] + random_planet_position_x, random_position[1] + random_planet_position_y),
+                developement=0,
+                name=f"{star.name}-{planet_letters[k]}",
+                abs_position=(px, py),
                 planet_resources={},
-                life_suitability={},
-                production=0,
-                distance_from_star=math.sqrt(random_planet_position_x**2 + random_planet_position_y**2),
+                life_suitability={
+                    'Human': random.uniform(0.10, 1.0),
+                    'Alien': random.uniform(0.10, 1.0),
+                    'Robot': random.uniform(0.10, 1.0),
+                    'Hybrid': random.uniform(0.10, 1.0),
+                },
+                production=1.0,
+                distance_from_star=dist,
                 is_colonized=False,
-                radius=random.uniform(0.01, 0.03)
-                
+                radius=planet_r,
             )
-
             p.post_init()
-            stars[-1].planets.append(p)
+            p.parent_star = star
+            star.planets.append(p)
 
-    map_G = nx.Graph()
-
-    for star in stars:
-        for other in stars:
-            dist = math.dist(star.position, other.position)
-
-            if other.position != star.position and dist < min_dist:
-                print(dist)
-                map_G.add_edge(star.name, other.name, weight=dist)
-
-    return map_G, stars
+    G = nx.Graph()
+    for s in stars:
+        G.add_node(s.name)
+    for i, s1 in enumerate(stars):
+        for s2 in stars[i + 1:]:
+            d = math.dist(s1.position, s2.position)
+            if 0 < d < min_dist:
+                G.add_edge(s1.name, s2.name, weight=d)
+    return G, stars
