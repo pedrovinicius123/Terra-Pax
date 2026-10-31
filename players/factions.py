@@ -8,6 +8,13 @@ import networkx as nx
 from graphics.star import Star, Planet
 from players.ships import Scout, ColonyShip, Transport, Warship
 
+RESEARCH_SCALE = 15.0
+
+TECH_CAPS = {
+    'ftl': 10, 'exploration': 10, 'propulsion': 10,
+    'weapons': 10, 'shields': 10, 'sensors': 10,
+    'construction': 10,
+}
 
 class FactionType(Enum):
     HUMAN = "Human"
@@ -90,8 +97,13 @@ class Faction:
         self.game_state = None
         self.controller = None
 
+        # Toggles controlados por controller/UI
         self.auto_colonize = False
+        self.auto_terraform = False
         self.eliminated = False
+
+        # Reservas de alvos (colony ships em construção/em voo)
+        self.reserved_targets = set()
 
         start = {'Minerals': 500, 'Food': 200, 'Energy': 300,
                  'Electronics': 100, 'Chemicals': 100, 'Alloys': 50,
@@ -109,21 +121,23 @@ class Faction:
         self.home_planet.defense = 500.0
         self.home_planet.max_defense = 500.0
 
-        self.resources = {}
         self.colonies = {self.home_planet.name: self.home_planet}
+        self.resources = {}
         self._recompute_resources()
 
         self.ships = {}
         self._ship_counter = 0
+        
         self.stations = {}
         self.scout_manager = None
 
         self.tech_tree = {'ftl': 1, 'exploration': 1, 'propulsion': 1,
                           'weapons': 1, 'shields': 1, 'sensors': 1,
                           'construction': 1}
-        self.research_queue = Queue()
-        self.current_research = None
-        self.research_progress = 0.0
+        
+        self.research_weights = {k: 1.0 for k in self.tech_tree}
+        self.research_progress = {k: 0.0 for k in self.tech_tree}
+        self.research_income_pool = 0.0
 
         self.diplomacy = {}
         self.war_declarations = set()
@@ -176,7 +190,8 @@ class Faction:
         self._ship_counter += 1
         return f"{self.name[:3].upper()}-{self._ship_counter:03d}"
 
-    def build_ship(self, design_key, planet=None):
+    def build_ship(self, design_key, planet=None,
+                   target_planet=None, target_star=None):
         if design_key not in DESIGNS:
             return False
         design = DESIGNS[design_key]
@@ -189,7 +204,10 @@ class Faction:
         self._recompute_resources()
         task = {'design_key': design_key,
                 'build_time': design['build_time'],
-                'id': self._next_ship_id(), 'planet': planet}
+                'id': self._next_ship_id(),
+                'planet': planet,
+                'target_planet': target_planet,
+                'target_star': target_star}
         planet.const_queue.put(task)
         return True
 
@@ -208,18 +226,11 @@ class Faction:
     def idle_colony_ships(self):
         return [s for s in self.ships.values()
                 if isinstance(s, ColonyShip) and s.alive
-                and not s.assigned.is_set()]
-
-    def _pending_colony_ships(self):
-        count = 0
-        for p in self.colonies.values():
-            for task in list(p.const_queue.queue):
-                if task.get('design_key') == 'colony':
-                    count += 1
-        return count
+                and s.target_planet is None]
 
     # ---------- Auto-colonização ----------
-    def find_best_colony_target(self, game_state):
+    def find_best_colony_target(self, game_state,
+                                respect_reservations=True):
         best_score, best = 0.0, None
         for star in game_state.stars:
             if star.name not in self.explored_stars:
@@ -227,26 +238,61 @@ class Faction:
             for planet in star.planets:
                 if planet.is_colonized:
                     continue
+                if (respect_reservations
+                        and planet.name in self.reserved_targets):
+                    continue
                 score = planet.get_suitability(self)
                 if score > best_score:
                     best_score, best = score, (star, planet)
         return best if best_score > 0.25 else None
 
     def auto_expand_step(self, game_state):
-        """Executa um passo de auto-colonização. Retorna True se agiu."""
+        """Um passo de auto-colonização. Cap = 1 colonizadora comprometida.
+
+        `reserved_targets` rastreia alvos já prometidos a uma nave
+        (em construção ou em voo). Como cada build adiciona 1 e cada
+        destroy remove 1, o império nunca tem mais de 1 nave sendo
+        produzida por vez.
+        """
+        # 1. Atribui alvos a naves ociosas (ex.: construídas manualmente)
         idle = self.idle_colony_ships()
         if idle:
             target = self.find_best_colony_target(game_state)
             if target:
-                idle[0].assign_target(*target)
-                return True
-        if len(idle) + self._pending_colony_ships() >= 1:
+                star, planet = target
+                self.reserved_targets.add(planet.name)
+                if idle[0].assign_target(star, planet):
+                    return True
+                self.reserved_targets.discard(planet.name)
+
+        # 2. Cap: não construir se já há reserva ativa
+        if self.reserved_targets:
             return False
-        if self.can_afford(DESIGNS['colony']['cost']):
-            target = self.find_best_colony_target(game_state)
-            if target:
-                self.build_ship('colony')
-                return True
+
+        # 3. Checa recursos e alvo
+        if not self.can_afford(DESIGNS['colony']['cost']):
+            return False
+        target = self.find_best_colony_target(game_state)
+        if not target:
+            return False
+
+        star, planet = target
+        self.reserved_targets.add(planet.name)
+        if not self.build_ship('colony', target_planet=planet,
+                               target_star=star):
+            self.reserved_targets.discard(planet.name)
+            return False
+        return True
+
+    # ---------- Auto-terraformação ----------
+    def auto_terraform_step(self, threshold_minerals=400):
+        """Tenta terraformar uma colônia. Retorna True se agiu."""
+        if len(self.colonies) < 3: return False
+        if self.resources.get('Minerals', 0) < threshold_minerals:
+            return False
+        for p in self.colonies.values():
+            if self.can_terraform(p):
+                return self.terraform(p)
         return False
 
     # ---------- Scouts ----------
@@ -261,41 +307,80 @@ class Faction:
         return self.build_ship('scout')
 
     # ---------- Pesquisa ----------
-    def queue_research(self, tech_field):
-        if tech_field in self.tech_tree:
-            self.research_queue.put(tech_field)
-
-    def set_research_focus(self, tech_field):
-        if tech_field not in self.tech_tree:
-            return False
-        while not self.research_queue.empty():
-            try:
-                self.research_queue.get_nowait()
-            except Exception:
-                break
-        self.current_research = None
-        self.research_progress = 0.0
-        self.research_queue.put(tech_field)
-        return True
+    def add_research_income(self, amount: float):
+        """Chamado por Planet.produce(). Acumula no pool."""
+        self.research_income_pool += amount * RESEARCH_SCALE
 
     def process_research(self, dt=1.0):
-        if self.current_research is None and not self.research_queue.empty():
-            self.current_research = self.research_queue.get()
-            self.research_progress = 0.0
-        if self.current_research:
-            cost = self.get_research_cost(self.current_research)
-            if self.research_progress >= cost:
-                self.tech_tree[self.current_research] += 1
-                self.stats['research_completed'] += 1
-                self.current_research = None
-                self.research_progress = 0.0
+        pool = self.research_income_pool
+        if pool <= 0:
+            return
+        self.research_income_pool = 0.0
 
+        # Apenas campos não-capados competem pelo pool
+        uncapped = [f for f in self.tech_tree
+                    if not self.is_tech_capped(f)]
+        if not uncapped:
+            return
+
+        total_weight = sum(self.research_weights.get(f, 0) for f in uncapped)
+        if total_weight <= 0:
+            # Todos os pesos zerados — distribui igualmente
+            for f in uncapped:
+                self.research_weights[f] = 1.0
+            total_weight = float(len(uncapped))
+
+        for field in uncapped:
+            weight = self.research_weights.get(field, 1.0)
+            if weight <= 0:
+                continue
+            share = pool * (weight / total_weight)
+            self.research_progress[field] += share
+
+            for _ in range(20):
+                if self.is_tech_capped(field):
+                    self.research_progress[field] = 0.0
+                    break
+                cost = self.get_research_cost(field)
+                if cost <= 0 or self.research_progress[field] < cost:
+                    break
+                self.research_progress[field] -= cost
+                self.tech_tree[field] += 1
+                self.stats['research_completed'] += 1
+
+    def set_research_weight(self, field: str, weight: float):
+        if field not in self.tech_tree:
+            return False
+        self.research_weights[field] = max(0.0, min(10.0, float(weight)))
+        return True
+
+    def reset_research_weights(self):
+        for k in self.research_weights:
+            self.research_weights[k] = 1.0
+
+    def compute_research_rate(self) -> float:
+        gs = self.game_state
+        if gs is None or gs.paused or gs.tick_interval <= 0:
+            return 0.0
+        if all(self.is_tech_capped(f) for f in self.tech_tree):
+            return 0.0
+        per_tick = sum(p.production * p.developement
+                       for p in self.colonies.values()
+                       if p.is_colonized and p.faction is self)
+        per_tick *= RESEARCH_SCALE
+        return per_tick / gs.tick_interval * gs.speed
+    
     def get_research_cost(self, tech_field):
         base = {'exploration': 100, 'propulsion': 120, 'weapons': 150,
                 'shields': 140, 'sensors': 110, 'construction': 130,
                 'ftl': 140}
-        return base.get(tech_field, 100) * self.tech_tree.get(tech_field, 1)
+        level = self.tech_tree.get(tech_field, 1)
+        # Curva geométrica: 100, 170, 289, 491, ... 11859 (Lv10)
+        return base.get(tech_field, 100) * (1.7 ** (level - 1))
 
+    def is_tech_capped(self, field):
+        return self.tech_tree.get(field, 1) >= TECH_CAPS.get(field, 10)
+    
     # ---------- Colonização ----------
     def establish_colony(self, star, planet):
         planet.is_colonized = True
@@ -313,6 +398,10 @@ class Faction:
         self.colonies[planet.name] = planet
         self.controlled_stars[star.name] = star
         self.stats['colonies_established'] += 1
+        # Limpa reservas obsoletas de TODAS as facções
+        if self.game_state is not None:
+            for f in self.game_state.factions:
+                f.reserved_targets.discard(planet.name)
         self._recompute_resources()
         return True
 
@@ -342,7 +431,7 @@ class Faction:
         planet.production *= 1.15
         return True
 
-    # ---------- Diplomacia (bilateral) ----------
+    # ---------- Diplomacia ----------
     def update_diplomacy(self, other, new_status):
         self.diplomacy[other.name] = new_status
         other.diplomacy[self.name] = new_status
@@ -363,14 +452,52 @@ class Faction:
             self.allies.discard(other.name)
             other.allies.discard(self.name)
 
-    # ---------- Status ----------
+    def compute_strength(self) -> dict:
+        """Força total comparável entre facções.
+        military: poder de fogo das naves de guerra
+        defense:  soma das defesas de colônias
+        economy:  produção × desenvolvimento × 10
+        tech:     níveis de tech × 5 (vantagem tecnológica)
+        """
+        mil = 0.0
+        for s in self.ships.values():
+            if not s.alive:
+                continue
+            w = getattr(s, 'weapons', 0)
+            if w > 0:
+                mil += w * (s.hull / 100.0) * (1.0 + s.max_shields / 100.0)
+        defs = sum(p.defense for p in self.colonies.values() if p.is_colonized)
+        econ = sum(p.production * p.developement
+                   for p in self.colonies.values() if p.is_colonized) * 10.0
+        tech = sum(self.tech_tree.values()) * 5.0
+        return {'military': mil, 'defense': defs, 'economy': econ,
+                'tech': tech, 'total': mil + defs + econ + tech}
+
+    def propose_alliance(self, other) -> bool:
+        if other is self or other.eliminated:
+            return False
+        status = self.diplomacy.get(other.name, DiplomacyStatus.NEUTRAL)
+        if status == DiplomacyStatus.WAR:
+            return False
+        if status == DiplomacyStatus.ALLY:
+            return True
+        self.update_diplomacy(other, DiplomacyStatus.ALLY)
+        return True
+
+    def break_alliance(self, other) -> bool:
+        if self.diplomacy.get(other.name) != DiplomacyStatus.ALLY:
+            return False
+        self.update_diplomacy(other, DiplomacyStatus.NEUTRAL)
+        return True
+    
+
     def get_status_report(self):
         return {'name': self.name, 'faction_type': self.faction_type.value,
                 'resources': dict(self.resources),
                 'tech_levels': dict(self.tech_tree),
+                'research_weights': dict(self.research_weights),
                 'colonies': len(self.colonies), 'ships': len(self.ships),
-                'stars_explored': len(self.explored_stars),
-                'current_research': self.current_research}
+                'stars_explored': len(self.explored_stars)}
 
     def stop_faction(self):
         if self.scout_manager:

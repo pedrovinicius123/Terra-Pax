@@ -9,7 +9,8 @@ class AIController(BaseController):
         self.aggression = aggression
         self.think_interval = think_interval
         self.timer = 0.0
-        self.faction.auto_colonize = True
+        faction.auto_colonize = True
+        faction.auto_terraform = True
 
     def update(self, state, dt):
         if self.faction.eliminated:
@@ -21,25 +22,32 @@ class AIController(BaseController):
         with state.lock:
             self._manage_research(state)
             self._manage_scouts(state)
-            self._manage_terraforming(state)
+            self.faction.auto_terraform_step()
             self.faction.auto_expand_step(state)
             self._manage_fleet(state)
             self._manage_diplomacy(state)
 
+    
     def _manage_research(self, state):
         f = self.faction
-        if f.current_research is not None or not f.research_queue.empty():
-            return
-        priorities = {
-            'exploration': 10 - f.tech_tree['exploration'],
-            'propulsion': 9 - f.tech_tree['propulsion'],
-            'ftl': 9 - f.tech_tree['ftl'],
-            'sensors': 7 - f.tech_tree['sensors'],
-            'construction': 6 - f.tech_tree['construction'],
-            'shields': 5 - f.tech_tree['shields'],
-            'weapons': 4 + int(3 * self.aggression) - f.tech_tree['weapons'],
+        aggression_bonus = int(3 * self.aggression)
+        base_priority = {
+            'exploration': 10, 'propulsion': 9, 'ftl': 9,
+            'sensors': 7, 'construction': 6, 'shields': 5,
+            'weapons': 4 + aggression_bonus,
         }
-        f.queue_research(max(priorities, key=priorities.get))
+        priorities = {}
+        for field in f.tech_tree:
+            if f.is_tech_capped(field):
+                f.research_weights[field] = 0.0
+                continue
+            priorities[field] = base_priority.get(field, 5) - f.tech_tree[field]
+
+        if not priorities:
+            return
+        min_p = min(priorities.values())
+        for field, p in priorities.items():
+            f.research_weights[field] = max(0.5, p - min_p + 1.0)
 
     def _manage_scouts(self, state):
         f = self.faction
@@ -48,15 +56,6 @@ class AIController(BaseController):
         max_scouts = 3 + f.tech_tree['exploration']
         if len(f.scout_manager.active_scouts) < max_scouts:
             f.build_ship('scout')
-
-    def _manage_terraforming(self, state):
-        f = self.faction
-        if f.resources.get('Minerals', 0) < 400:
-            return
-        for p in f.colonies.copy().values():
-            if f.can_terraform(p):
-                f.terraform(p)
-                break
 
     def _manage_fleet(self, state):
         f = self.faction
@@ -75,16 +74,27 @@ class AIController(BaseController):
                     f.build_ship(key)
                     break
 
+
     def _manage_diplomacy(self, state):
         f = self.faction
+        my_power = f.compute_strength()['total']
+        at_war = len(f.war_declarations) > 0
+
         for other in state.factions:
             if other is f or other.eliminated:
                 continue
             status = f.diplomacy.get(other.name, DiplomacyStatus.NEUTRAL)
-            if status == DiplomacyStatus.WAR:
-                continue  # não faz paz sozinha
-            if status == DiplomacyStatus.ALLY:
+            if status in (DiplomacyStatus.WAR, DiplomacyStatus.ALLY):
+                continue  # não mexe em guerra nem aliança existente
+
+            their_power = other.compute_strength()['total']
+
+            # Buscar aliança se em guerra e o outro é mais forte
+            if at_war and their_power > my_power * 1.1:
+                f.propose_alliance(other)
                 continue
-            ratio = (len(f.ships) + 1) / (len(other.ships) + 1)
-            if ratio > 2.5 and self.aggression > 0.7:
+
+            # Declarar guerra com vantagem esmagadora
+            ratio = (my_power + 1) / (their_power + 1)
+            if ratio > 2.0 and self.aggression > 0.7 and not at_war:
                 f.update_diplomacy(other, DiplomacyStatus.WAR)

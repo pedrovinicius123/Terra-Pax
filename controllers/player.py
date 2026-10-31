@@ -1,5 +1,5 @@
 from controllers.base import BaseController
-from players.factions import DESIGNS
+from players.factions import DESIGNS, DiplomacyStatus
 
 
 class PlayerController(BaseController):
@@ -14,46 +14,61 @@ class PlayerController(BaseController):
             return
         if self.faction.auto_colonize:
             self.faction.auto_expand_step(state)
+        if self.faction.auto_terraform:
+            self.faction.auto_terraform_step()
 
     def select(self, star, planet=None):
         self.selected_star = star
         self.selected_planet = planet
 
-    def set_research(self, tech):
-        return self.faction.set_research_focus(tech)
+    def set_research_weight(self, field, weight):
+        return self.faction.set_research_weight(field, weight)
+
+    def reset_research_weights(self):
+        self.faction.reset_research_weights()
 
     def build_ship(self, design_key):
         return self.faction.build_ship(design_key)
 
+    def propose_alliance(self, other):
+        return self.faction.propose_alliance(other)
+
+    def break_alliance(self, other):
+        return self.faction.break_alliance(other)
+
     def send_colony_ship(self, star, planet):
         if planet is None or planet.is_colonized:
+            return False
+        if planet.name in self.faction.reserved_targets:
             return False
         idle = self.faction.idle_colony_ships()
         if not idle:
             return False
-        return idle[0].assign_target(star, planet)
+        self.faction.reserved_targets.add(planet.name)
+        if idle[0].assign_target(star, planet):
+            return True
+        self.faction.reserved_targets.discard(planet.name)
+        return False
 
     def has_idle_colony_ship(self):
         return bool(self.faction.idle_colony_ships())
 
-    def terraform(self):
-        f = self.faction
-        if f.resources.get('Minerals', 0) < 400:
-            return
-        for p in f.colonies.copy().values():
-            if f.can_terraform(p):
-                f.terraform(p)
-                break
+    def terraform(self, planet):
+        return self.faction.terraform(planet)
+
+    def can_terraform(self, planet):
+        return self.faction.can_terraform(planet)
 
     def toggle_auto_colonize(self):
         self.faction.auto_colonize = not self.faction.auto_colonize
         return self.faction.auto_colonize
 
+    def toggle_auto_terraform(self):
+        self.faction.auto_terraform = not self.faction.auto_terraform
+        return self.faction.auto_terraform
+
     def declare_war(self, other):
-        from players.factions import DiplomacyStatus
         self.faction.update_diplomacy(other, DiplomacyStatus.WAR)
 
     def make_peace(self, other):
-        from players.factions import DiplomacyStatus
         self.faction.update_diplomacy(other, DiplomacyStatus.PEACE)
-

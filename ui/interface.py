@@ -232,6 +232,11 @@ class GameUI:
         self.log_msg(f"Auto-colonizar: {'ON' if on else 'OFF'}")
         self._rebuild_panel_buttons()
 
+    def _toggle_auto_terraform(self):
+        on = self.player.toggle_auto_terraform()
+        self.log_msg(f"Auto-terraform: {'ON' if on else 'OFF'}")
+        self._rebuild_panel_buttons()
+
     def _declare_war(self, other):
         self.player.declare_war(other)
         self.log_msg(f"Guerra: {other.name}")
@@ -241,6 +246,18 @@ class GameUI:
         self.player.make_peace(other)
         self.log_msg(f"Paz: {other.name}")
         self._rebuild_panel_buttons()
+
+    def _propose_alliance(self, other):
+        if self.player.propose_alliance(other):
+            self.log_msg(f"Aliança: {other.name}")
+            self._rebuild_panel_buttons()
+        else:
+            self.log_msg("Aliança recusada")
+
+    def _break_alliance(self, other):
+        if self.player.break_alliance(other):
+            self.log_msg(f"Aliança rompida: {other.name}")
+            self._rebuild_panel_buttons()
 
     # ---------- Painel ----------
     def _planet_action(self, p):
@@ -270,16 +287,18 @@ class GameUI:
         f = self.faction
 
         if self.active_tab == 'research':
-            y = content_y + 22
-            for tech in f.tech_tree:
-                lvl = f.tech_tree[tech]
-                cost = f.get_research_cost(tech)
-                btn = Button((x0, y, w, 20),
-                             f"{tech} (Lv{lvl}) {int(cost)}",
-                             lambda t=tech: self._set_research(t))
-                btn._active = (f.current_research == tech)
-                self._panel_buttons.append(btn)
-                y += 22
+            y = content_y + 24   # pula linha do cabeçalho
+            for field in f.tech_tree:
+                self._panel_buttons.append(Button(
+                    (x0 + w - 52, y - 2, 22, 18), "-",
+                    lambda fl=field: self._adjust_weight(fl, -0.5)))
+                self._panel_buttons.append(Button(
+                    (x0 + w - 28, y - 2, 22, 18), "+",
+                    lambda fl=field: self._adjust_weight(fl, +0.5)))
+                y += 40
+            self._panel_buttons.append(Button(
+                (x0, y + 2, w, 22), "Reset pesos (1x cada)",
+                self._reset_research_weights))
 
         elif self.active_tab == 'build':
             y = content_y + 22
@@ -342,36 +361,78 @@ class GameUI:
 
         elif self.active_tab == 'war':
             y = content_y + 22
+            bw = (w - 4) // 2
             ac_label = f"Auto-colonizar: {'ON' if f.auto_colonize else 'OFF'}"
+            at_label = f"Auto-terraform: {'ON' if f.auto_terraform else 'OFF'}"
             self._panel_buttons.append(Button(
-                (x0, y, w, 24), ac_label, self._toggle_auto_colonize))
-            y += 34
+                (x0, y, bw, 24), ac_label, self._toggle_auto_colonize))
+            self._panel_buttons.append(Button(
+                (x0 + bw + 4, y, bw, 24), at_label,
+                self._toggle_auto_terraform))
+            y += 30
+
+            my_total = f.compute_strength()['total']
             self._panel_buttons.append(_FakeLabel(
-                (x0, y, w, 18), "DIPLOMACIA", self.f_med, color=C.ACCENT))
+                (x0, y, w, 16),
+                f"MINHA FORÇA: {my_total:.0f}",
+                self.f_med, color=C.ACCENT))
             y += 22
+            self._panel_buttons.append(_FakeLabel(
+                (x0, y, w, 16), "DIPLOMACIA E FORÇA",
+                self.f_med, color=C.ACCENT))
+            y += 20
+
             for other in self.state.factions:
                 if other is f:
                     continue
                 if other.eliminated:
                     self._panel_buttons.append(_FakeLabel(
-                        (x0, y, w, 20),
-                        f"{other.name[:18]}: eliminada",
+                        (x0, y, w, 16),
+                        f"{other.name[:18]} — eliminada",
                         self.f_small, color=C.DIM))
-                    y += 24
+                    y += 18
                     continue
                 status = f.diplomacy.get(other.name, DiplomacyStatus.NEUTRAL)
-                label = f"{other.name[:18]}: {status.value}"
+                their_total = other.compute_strength()['total']
+                ratio = (my_total + 1) / (their_total + 1)
+                if ratio >= 1.5:
+                    ratio_col = (110, 230, 130)   # verde — dominamos
+                elif ratio >= 0.8:
+                    ratio_col = (230, 200, 80)    # amarelo — equilibrado
+                else:
+                    ratio_col = (200, 90, 90)     # vermelho — perdendo
+
+                # linha 1: nome + status
                 self._panel_buttons.append(_FakeLabel(
-                    (x0, y, w - 80, 20), label, self.f_small))
+                    (x0, y, w, 16),
+                    f"{other.name[:18]}  [{status.value}]",
+                    self.f_small))
+                y += 16
+                # linha 2: força
+                self._panel_buttons.append(_FakeLabel(
+                    (x0 + 4, y, w - 4, 14),
+                    f"  Força {their_total:.0f}  ({ratio:.2f}x nossa)",
+                    self.f_small, color=ratio_col))
+                y += 16
+                # linha 3: ações
                 if status == DiplomacyStatus.WAR:
                     self._panel_buttons.append(Button(
-                        (x0 + w - 75, y, 75, 20), "Paz",
+                        (x0, y, 90, 20), "Paz",
                         lambda o=other: self._make_peace(o)))
+                    y += 22
+                elif status == DiplomacyStatus.ALLY:
+                    self._panel_buttons.append(Button(
+                        (x0, y, 130, 20), "Romper aliança",
+                        lambda o=other: self._break_alliance(o)))
+                    y += 22
                 else:
                     self._panel_buttons.append(Button(
-                        (x0 + w - 75, y, 75, 20), "Guerra",
+                        (x0, y, 80, 20), "Guerra",
                         lambda o=other: self._declare_war(o)))
-                y += 24
+                    self._panel_buttons.append(Button(
+                        (x0 + 86, y, 100, 20), "Aliança",
+                        lambda o=other: self._propose_alliance(o)))
+                    y += 22
 
     # ---------- Coordenadas ----------
     def world_to_screen(self, x, y):
@@ -583,7 +644,7 @@ class GameUI:
             self._influence_cache_key = cache_key
             self._influence_surface = empty
             return
-        SCALE = 5
+        SCALE = 3
         gw = self.W // SCALE + 1
         gh = self.H // SCALE + 1
         gx, gy = np.meshgrid(np.arange(gw) * SCALE,
@@ -655,7 +716,7 @@ class GameUI:
                                            (px, py), pr + 3, 1)
 
     def _draw_ships(self):
-        for s in self.faction.ships.values():
+        for s in self.faction.ships.copy().values():
             if not s.alive:
                 continue
             sx, sy = self.world_to_screen(*s.abs_position)
@@ -670,7 +731,7 @@ class GameUI:
         for f in self.state.factions:
             if f is self.faction or f.eliminated:
                 continue
-            for s in f.ships.values():
+            for s in list(f.ships.values()):
                 if not s.alive:
                     continue
                 sx, sy = self.world_to_screen(*s.abs_position)
@@ -682,10 +743,13 @@ class GameUI:
         pygame.draw.rect(self.screen, C.PANEL_BG, (0, 0, self.W, self.TOP_H))
         pygame.draw.line(self.screen, C.PANEL_BR,
                          (0, self.TOP_H), (self.W, self.TOP_H))
+        
         war_n = len(self.faction.war_declarations)
+        ally_n = len(self.faction.allies)
         txt = (f"TERRA PAX  T={self.state.time:.0f}s  "
                f"{self.faction.name}  {self.state.speed:.0f}x  "
-               f"frota {len(self.faction.ships)}  guerras {war_n}")
+               f"frota {len(self.faction.ships)}  "
+               f"guerras {war_n}  aliados {ally_n}")
         self.screen.blit(self.f_title.render(txt, True, C.TEXT), (10, 8))
 
     def _draw_panel(self):
@@ -741,21 +805,42 @@ class GameUI:
                     True, C.DIM), (x0 + 10, y))
 
         elif self.active_tab == 'research':
-            self.screen.blit(self.f_med.render("FOCO DE PESQUISA",
-                                               True, C.ACCENT), (x0 + 10, y))
-            y += 18
-            cur = f.current_research or "-"
-            cost = (f.get_research_cost(f.current_research)
-                    if f.current_research else 0)
-            self.screen.blit(self.f.render(f"Atual: {cur}", True, C.TEXT),
-                             (x0 + 10, y))
-            y += 14
-            if cost:
-                pct = min(1.0, f.research_progress / cost)
+            rate = f.compute_research_rate()
+            total_w = sum(f.research_weights.values()) or 1.0
+            self.screen.blit(self.f_med.render(
+                f"PESQUISA  {rate:5.1f}/s", True, C.ACCENT),
+                (x0 + 10, y))
+            y += 20
+
+            bar_w = total_w - 12
+            for field in f.tech_tree:
+                lvl = f.tech_tree[field]
+                cost = f.get_research_cost(field)
+                prog = f.research_progress[field]
+                pct = min(1.0, prog / cost) if cost > 0 else 0.0
+                share = f.research_weights[field] / total_w * 100.0
+
+                # Linha 1: nome / nível / peso
+                self.screen.blit(self.f_small.render(
+                    f"{field:12s} Lv{lvl}  {share:5.1f}%",
+                    True, C.TEXT), (x0 + 10, y))
+                y += 16
+
+                # Linha 2: barra
                 pygame.draw.rect(self.screen, (30, 40, 60),
-                                 (x0 + 10, y, 220, 6))
-                pygame.draw.rect(self.screen, (110, 220, 180),
-                                 (x0 + 10, y, int(220 * pct), 6))
+                                 (x0 + 10, y, bar_w, 6))
+                fill_col = ((255, 230, 100) if pct > 0.9
+                            else (110, 220, 180))
+                if pct > 0:
+                    pygame.draw.rect(self.screen, fill_col,
+                                     (x0 + 10, y, int(bar_w * pct), 6))
+                y += 8
+
+                # Linha 3: números
+                self.screen.blit(self.f_small.render(
+                    f"  {prog:7.1f}/{cost:6.0f}  ({pct*100:5.1f}%)",
+                    True, C.DIM), (x0 + 10, y))
+                y += 16
 
         elif self.active_tab == 'fleet':
             self.screen.blit(self.f_med.render(
@@ -847,3 +932,12 @@ class GameUI:
             self.screen.blit(bg, (x - 4, y))
             self.screen.blit(surf, (x, y + 1))
             y += line_h
+
+    def _adjust_weight(self, field, delta):
+        f = self.faction
+        new_w = f.research_weights.get(field, 1.0) + delta
+        f.set_research_weight(field, new_w)
+
+    def _reset_research_weights(self):
+        self.player.reset_research_weights()
+        self.log_msg("Pesos de pesquisa resetados (1x cada)")

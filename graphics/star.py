@@ -5,7 +5,7 @@ import threading
 import time
 
 
-@dataclass
+@dataclass(eq=False)
 class Planet:
     n_planet_resources: int
     planet_resources: Dict[str, float]
@@ -50,20 +50,44 @@ class Planet:
             return self.life_suitability[key]
         return 0.0
 
+    def _compute_caps(self):
+        """Teto de desenvolvimento e população por nível de terraformação."""
+        tier = min(getattr(self, 'terraform_level', 0), 3)
+        caps = [
+            (2.0, 2_000),
+            (5.0, 6_000),
+            (10.0, 15_000),
+            (20.0, 40_000),
+        ]
+        return caps[tier]
+
+    def capacity_info(self) -> dict:
+        max_dev, max_pop = self._compute_caps()
+        return {
+            'max_dev': max_dev,
+            'max_pop': max_pop,
+            'dev_capped': self.developement >= max_dev - 1e-6,
+            'pop_capped': self.population >= max_pop - 1e-6,
+        }
+
     def develop(self):
-        self.developement *= 1.02
-        self.population *= 1.02
-        if self.developement > 3:
-            self.developement *= 1.005
-            self.population *= 1.005
-        if self.developement > 10:
+        max_dev, max_pop = self._compute_caps()
+
+        if self.developement < max_dev:
+            self.developement = min(max_dev, self.developement * 1.02)
+        if self.population < max_pop:
+            self.population = min(max_pop, self.population * 1.02)
+
+        # Libera construção assim que a colônia cresce um pouco
+        if self.developement > 0.3:
             self.can_build_ships = True
+
         # Regen de defesa
         if (self.is_colonized and self.max_defense > 0
                 and self.defense < self.max_defense):
-            self.defense = min(
-                self.max_defense,
-                self.defense + 1.5 * self.developement)
+            self.defense = min(self.max_defense,
+                               self.defense + 1.5 * self.developement)
+
         self.const()
         self.produce()
 
@@ -96,18 +120,23 @@ class Planet:
             from players.factions import DESIGNS
         except Exception:
             return
-        build_time = float(task.get('build_time', 5))
-        state = getattr(self.faction, 'game_state', None)
-        if state is not None:
-            t0 = state.time
-            while state.time - t0 < build_time:
-                time.sleep(0.05)
-        else:
-            time.sleep(build_time)
-        design = DESIGNS.get(task.get('design_key'))
-        if design is None:
-            return
         try:
+            build_time = float(task.get('build_time', 5))
+            state = getattr(self.faction, 'game_state', None)
+            if state is not None:
+                t0 = state.time
+                while state.time - t0 < build_time:
+                    time.sleep(0.05)
+            else:
+                time.sleep(build_time)
+
+            if self.faction is None or self.faction.eliminated:
+                return
+
+            design = DESIGNS.get(task.get('design_key'))
+            if design is None:
+                return
+
             ship = design['class'](
                 ship_id=task['id'], faction=self.faction,
                 map_G=self.faction.map_G,
@@ -115,6 +144,18 @@ class Planet:
                 total_stars=self.faction.all_stars,
                 design_key=task['design_key'],
                 **design['stats'])
+
+            # Alvo pré-atribuído (reserva feita no build_ship)
+            target_star = task.get('target_star')
+            target_planet = task.get('target_planet')
+            if (target_star is not None and target_planet is not None
+                    and hasattr(ship, 'assign_target')):
+                if target_planet.is_colonized:
+                    # Alguém tomou o planeta enquanto estávamos construindo
+                    self.faction.reserved_targets.discard(target_planet.name)
+                else:
+                    ship.assign_target(target_star, target_planet)
+
             self.ships.append(ship)
             self.faction.ships[ship.ship_id] = ship
             ship.start()
@@ -128,7 +169,7 @@ class Planet:
         prod = self.production * self.developement
         for resource in list(self.planet_resources.keys()):
             if resource == 'Research':
-                self.faction.research_progress += prod
+                self.faction.add_research_income(prod)   # ← NOVO
                 continue
             cap = self.storage_capacity.get(resource, 0)
             if self.planet_resources[resource] >= cap:
@@ -156,4 +197,3 @@ class Star:
     green_zone: float
     position: Tuple[float, float]
     planets: List[Planet]
-    

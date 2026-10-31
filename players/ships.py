@@ -174,33 +174,68 @@ class ColonyShip(Ship):
         super().__init__(**kwargs)
         self.target_star = None
         self.target_planet = None
-        self.assigned = threading.Event()
+        self._wake = threading.Event()
 
     def assign_target(self, star, planet):
-        if self.assigned.is_set():
+        if self.target_planet is not None:
+            return False
+        if planet.is_colonized:
             return False
         self.target_star = star
         self.target_planet = planet
-        self.assigned.set()
-        self.activity = f"colonizando {planet.name}"
+        self.activity = f"-> {planet.name}"
+        self._wake.set()
         return True
 
+    def _release_target(self):
+        if self.target_planet is not None and self.faction is not None:
+            self.faction.reserved_targets.discard(self.target_planet.name)
+        self.target_star = None
+        self.target_planet = None
+        self._wake.clear()
+
+    def destroy(self):
+        if self.target_planet is not None and self.faction is not None:
+            self.faction.reserved_targets.discard(self.target_planet.name)
+            self.target_planet = None
+            self.target_star = None
+        super().destroy()
+
     def tick(self):
-        while self.running and self.alive and not self.assigned.wait(0.5):
-            pass
-        if not self.running or not self.alive:
-            return
-        if self.target_planet is None or self.target_planet.is_colonized:
-            self.activity = "sem alvo"
-            return
-        path = self.find_path_to_star(self.target_star) or [self.target_star]
-        for star in path:
+        while self.running and self.alive:
+            if not self._wake.wait(0.5):
+                continue
             if not self.running or not self.alive:
                 return
-            self.move_to_star(self.current_position, star)
-        if self.target_planet and not self.target_planet.is_colonized:
-            if self.faction.establish_colony(self.target_star, self.target_planet):
+
+            tgt_star = self.target_star
+            tgt_planet = self.target_planet
+            if tgt_star is None or tgt_planet is None:
+                self._wake.clear()
+                continue
+
+            if tgt_planet.is_colonized:
+                self._release_target()
+                return
+
+            path = self.find_path_to_star(tgt_star) or [tgt_star]
+            for star in path:
+                if not self.running or not self.alive:
+                    return
+                self.move_to_star(self.current_position, star)
+
+            if not self.running or not self.alive:
+                return
+
+            if tgt_planet.is_colonized:
+                self._release_target()
+                self.activity = "sem alvo"
+                continue
+
+            if self.faction.establish_colony(tgt_star, tgt_planet):
                 self.destroy()
+                return
+            
 
 
 class Transport(Ship):
