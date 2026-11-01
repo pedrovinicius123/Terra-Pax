@@ -93,6 +93,18 @@ class NewGameSelectionTests(unittest.TestCase):
             selection.handle_event(pygame.event.Event(
                 pygame.KEYDOWN, key=pygame.K_RETURN)), "standard")
 
+    def test_victory_options_fit_common_window_sizes(self):
+        for size in ((1400, 820), (900, 600), (480, 560)):
+            with self.subTest(size=size):
+                selection = VictorySelectionScreen(
+                    pygame.Surface(size))
+                selection.draw()
+                self.assertEqual(len(selection.option_rects), 6)
+                self.assertTrue(all(
+                    0 <= rect.left < rect.right <= size[0]
+                    and 0 <= rect.top < rect.bottom <= size[1]
+                    for rect in selection.option_rects))
+
     def test_in_game_button_requests_a_new_game(self):
         faction = make_faction("Player")
         state = GameState(None, [], [faction])
@@ -104,6 +116,17 @@ class NewGameSelectionTests(unittest.TestCase):
             pygame.MOUSEBUTTONDOWN, button=1, pos=restart.rect.center))
 
         self.assertTrue(ui.restart_requested)
+
+    def test_topbar_status_text_does_not_extend_under_planet_filters(self):
+        faction = make_faction("Player")
+        state = GameState(None, [], [faction])
+        ui = GameUI(
+            pygame.Surface((1400, 820)), state, PlayerController(faction))
+
+        status_clip = ui._topbar_status_clip_rect()
+
+        self.assertLess(
+            status_clip.right, ui._filter_buttons[0].rect.left)
 
     def test_custom_faction_can_change_name_and_traits(self):
         faction = make_faction("Original")

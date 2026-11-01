@@ -12,9 +12,9 @@ BASE_COLONIZATION_RANGE = 600.0
 COLONIZATION_RANGE_PER_FTL_LEVEL = 100.0
 
 TECH_CAPS = {
-    'ftl': 10, 'exploration': 10, 'propulsion': 10,
-    'weapons': 10, 'shields': 10, 'sensors': 10,
-    'construction': 10, 'biotech': 10,
+    'ftl': 20, 'exploration': 20, 'propulsion': 20,
+    'weapons': 20, 'shields': 20, 'sensors': 20,
+    'construction': 20, 'biotech': 20,
 }
 
 FACTION_TRAITS = {

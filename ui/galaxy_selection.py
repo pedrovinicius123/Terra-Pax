@@ -110,6 +110,20 @@ class VictorySelectionScreen:
         self.body_font = pygame.font.SysFont("Consolas", 15, bold=True)
         self.small_font = pygame.font.SysFont("Consolas", 12)
 
+    def _wrap_text(self, text, max_width):
+        lines = []
+        line = ""
+        for word in text.split():
+            candidate = f"{line} {word}".strip()
+            if line and self.small_font.size(candidate)[0] > max_width:
+                lines.append(line)
+                line = word
+            else:
+                line = candidate
+        if line:
+            lines.append(line)
+        return lines
+
     def on_resize(self, screen):
         self.screen = screen
 
@@ -134,7 +148,9 @@ class VictorySelectionScreen:
         screen = self.screen
         width, height = screen.get_size()
         screen.fill((7, 12, 25))
-        title = self.title_font.render(
+        title_font = pygame.font.SysFont(
+            "Consolas", min(30, max(16, width // 26)), bold=True)
+        title = title_font.render(
             "ESCOLHA A CONDIÇÃO DE VITÓRIA", True, (224, 237, 247))
         screen.blit(title, title.get_rect(center=(width // 2, height // 4)))
         subtitle = self.small_font.render(
@@ -143,7 +159,7 @@ class VictorySelectionScreen:
         screen.blit(subtitle, subtitle.get_rect(
             center=(width // 2, height // 4 + 42)))
 
-        columns = max(1, min(3, (width - 48) // 230))
+        columns = max(1, min(3, (width - 48) // 300))
         rows = (len(self.OPTIONS) + columns - 1) // columns
         gap = 10
         card_width = (width - 40 - gap * (columns - 1)) // columns
@@ -171,9 +187,24 @@ class VictorySelectionScreen:
                 border_radius=8)
             label_surface = self.body_font.render(
                 label, True, (224, 237, 247))
-            detail_surface = self.small_font.render(
-                details, True, (136, 180, 203))
+            detail_lines = self._wrap_text(details, card_width - 24)
+            max_detail_lines = max(
+                1, (card_height - label_surface.get_height() - 8)
+                // self.small_font.get_linesize())
+            detail_lines = detail_lines[:max_detail_lines]
+            detail_height = len(detail_lines) * self.small_font.get_linesize()
+            content_height = label_surface.get_height() + 5 + detail_height
+            content_top = rect.centery - content_height // 2
             screen.blit(label_surface, label_surface.get_rect(
-                center=(rect.centerx, rect.centery - 13)))
-            screen.blit(detail_surface, detail_surface.get_rect(
-                center=(rect.centerx, rect.centery + 14)))
+                center=(rect.centerx,
+                        content_top + label_surface.get_height() // 2)))
+            detail_y = content_top + label_surface.get_height() + 5
+            for line_index, line in enumerate(detail_lines):
+                detail_surface = self.small_font.render(
+                    line, True, (136, 180, 203))
+                screen.blit(detail_surface, detail_surface.get_rect(
+                    center=(
+                        rect.centerx,
+                        detail_y + line_index * self.small_font.get_linesize()
+                        + self.small_font.get_linesize() // 2,
+                    )))

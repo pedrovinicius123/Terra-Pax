@@ -267,6 +267,13 @@ class GameUI:
                        lambda m=mode: self._set_filter(m)))
             base_x += 74
 
+    def _topbar_status_clip_rect(self):
+        status_right = min(
+            self.W - self.PANEL_W - 20,
+            self._filter_buttons[0].rect.left - 10,
+        )
+        return pygame.Rect(490, 0, max(0, status_right - 490), self.TOP_H)
+
     def _build_tab_buttons(self):
         x0 = self.W - self.PANEL_W + 2
         y = self.TOP_H + 8
@@ -1334,10 +1341,9 @@ class GameUI:
             f"guerras {war_n}  aliados {ally_n}  |  {self.state.speed:g}x",
             True, C.DIM,
         )
-        status_right = self.W - self.PANEL_W - 20
-        if status_right > 490:
-            self.screen.set_clip(pygame.Rect(490, 0, status_right - 490,
-                                             self.TOP_H))
+        status_clip = self._topbar_status_clip_rect()
+        if status_clip.width > 0:
+            self.screen.set_clip(status_clip)
             self.screen.blit(status, (490, 12))
             self.screen.set_clip(None)
 
