@@ -23,6 +23,18 @@ com Cython; usa otimização nativa (`-O3` no GCC/Clang, `/O2` no MSVC).
 No Windows, ative o ambiente com `.venv\Scripts\activate` antes de executar
 os comandos.
 
+Para gerar um executável único, instale as dependências acima e execute:
+
+```bash
+python build_executable.py
+```
+
+O arquivo será criado em `dist/TerraPax` no Linux/macOS ou
+`dist/TerraPax.exe` no Windows. Ele inclui o runtime Python, as dependências e
+os assets do jogo. O build compila os módulos Cython antes de empacotar; um
+compilador C/C++ é necessário. O executável é específico para o sistema
+operacional e a arquitetura em que foi compilado.
+
 As camadas leves de compatibilidade da logística continuam em Python e
 delegam o planejamento de transferências aos kernels Cython. Para executar
 diretamente a versão Python durante desenvolvimento, use `python main.py`.

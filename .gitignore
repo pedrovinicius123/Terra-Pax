@@ -1,6 +1,7 @@
 task_terra_pax.md
 */__pycache__
 build/
+dist/
 *.so
 *.o
 city_lights.jpeg
