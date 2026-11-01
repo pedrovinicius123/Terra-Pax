@@ -7,7 +7,6 @@ from players.ships import ColonyShip, Scout, Transport, Warship
 from graphics.planet_generator import (
     city_light_intensity,
     dominant_suitability,
-    generate_city_networks,
     generate_planet_surface,
 )
 from logistics.game_3d import PlanetViewer3D
@@ -1111,14 +1110,12 @@ class GameUI:
                 px, py = self.world_to_screen(*p.abs_position)
                 pr = max(1, int(p.radius * self.zoom))
                 if -pr <= px <= self.W + pr and -pr <= py <= self.H + pr:
-                    if pr >= 8:
+                    if pr >= 8 or p.is_colonized and pr >= 4:
                         image = self._map_planet_surface(p, pr * 2)
                         self.screen.blit(image, (px - pr, py - pr))
                     else:
                         pygame.draw.circle(
                             self.screen, self._planet_color(p), (px, py), pr)
-                    if p.is_colonized and 4 <= pr < 8:
-                        self._draw_city_lights_2d(p, px, py, pr)
                     if not p.is_colonized and pr >= 3:
                         pygame.draw.circle(
                             self.screen, self._planet_color(p), (px, py),
@@ -1174,51 +1171,6 @@ class GameUI:
             )
             pygame.draw.line(self.screen, color, point_start, point_end, 1)
             offset += dash_length + gap_length
-
-    def _draw_city_lights_2d(self, planet, x, y, radius):
-        capacity = planet.capacity_info()
-        intensity = city_light_intensity(
-            planet.developement, planet.population,
-            capacity['max_dev'], capacity['max_pop'],
-        )
-        if intensity <= 0.02:
-            return
-        seed = f"{planet.parent_star.name}:{planet.name}"
-        networks = generate_city_networks(seed)
-        active_cities = networks[:max(
-            1, round(len(networks) * intensity))]
-        lights = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
-        road_color = (255, 170, 83, round(55 + 90 * intensity))
-        block_color = (255, 215, 142, round(100 + 140 * intensity))
-        sun = (-0.45, 0.24, 0.86)
-        for center, blocks, roads, city_radius in active_cities:
-            for start, end in roads:
-                if (start[2] <= 0.0 or end[2] <= 0.0
-                        or sum(start[i] * sun[i] for i in range(3)) >= 0.0
-                        or sum(end[i] * sun[i] for i in range(3)) >= 0.0):
-                    continue
-                pygame.draw.aaline(
-                    lights, road_color,
-                    (round(x + start[0] * radius),
-                     round(y - start[1] * radius)),
-                    (round(x + end[0] * radius),
-                     round(y - end[1] * radius)),
-                )
-            for px, py, pz in blocks:
-                if (pz <= 0.0
-                        or px * sun[0] + py * sun[1] + pz * sun[2] >= 0.0):
-                    continue
-                pygame.draw.circle(
-                    lights, block_color,
-                    (round(x + px * radius), round(y - py * radius)), 1)
-            if (center[2] > 0.0
-                    and sum(center[i] * sun[i] for i in range(3)) < 0.0):
-                pygame.draw.circle(
-                    lights, (255, 167, 80, round(90 + 130 * intensity)),
-                    (round(x + center[0] * radius),
-                     round(y - center[1] * radius)),
-                    max(1, round(city_radius * radius * 0.18)))
-        self.screen.blit(lights, (0, 0))
 
     def _draw_ships(self):
         for s in self.faction.ships.copy().values():

@@ -2,6 +2,7 @@ import math
 import random
 from collections.abc import Mapping
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pygame
@@ -50,6 +51,99 @@ def _stable_seed(value: str) -> int:
     for character in value:
         seed = ((seed ^ ord(character)) * 16777619) & 0xFFFFFFFF
     return seed
+
+
+ASSET_DIRECTORY = Path(__file__).with_name("assets")
+
+
+@lru_cache(maxsize=4)
+def _load_asset_surface(filename: str) -> pygame.Surface:
+    path = ASSET_DIRECTORY / filename
+    if not path.is_file():
+        raise FileNotFoundError(f"Required planet texture asset is missing: {path}")
+    return pygame.image.load(str(path))
+
+
+@lru_cache(maxsize=32)
+def _asset_pixels(
+        filename: str, size: tuple[int, int]) -> np.ndarray:
+    image = pygame.transform.smoothscale(
+        _load_asset_surface(filename), size)
+    return np.transpose(pygame.surfarray.array3d(image), (1, 0, 2))
+
+
+@lru_cache(maxsize=8)
+def generate_starfield_surface(size: tuple[int, int]) -> pygame.Surface:
+    """Scale and tint the NASA all-sky mosaic for the planet viewer backdrop."""
+    starfield = pygame.transform.smoothscale(
+        _load_asset_surface("wise_starfield.jpg"), size)
+    starfield.fill((95, 120, 165), special_flags=pygame.BLEND_RGB_MULT)
+    starfield.set_alpha(165)
+    return starfield
+
+
+def _seeded_asset_pixels(
+        filename: str, size: tuple[int, int], seed: str,
+        layer: str) -> np.ndarray:
+    pixels = _asset_pixels(filename, size)
+    generator = random.Random(_stable_seed(f"{seed}:{layer}"))
+    width, height = size
+    offset_x = generator.randrange(width)
+    offset_y = generator.randrange(max(1, round(height * 0.12))) - round(
+        height * 0.06)
+    transformed = np.roll(pixels, (offset_y, offset_x), axis=(0, 1))
+    if generator.random() < 0.5:
+        transformed = transformed[:, ::-1]
+    return transformed
+
+
+def generate_cloud_texture(seed: str, size: tuple[int, int]):
+    """Return a seeded, transparent cloud layer from the NASA cloud atlas."""
+    width, height = size
+    source = _seeded_asset_pixels(
+        "earth_clouds.jpg", size, seed, "clouds").astype(np.float32)
+    luminance = (
+        0.2126 * source[..., 0]
+        + 0.7152 * source[..., 1]
+        + 0.0722 * source[..., 2]
+    )
+    alpha = np.clip((luminance - 70.0) * 1.25, 0, 165).astype(np.uint8)
+    cloud = pygame.Surface((width, height), pygame.SRCALPHA)
+    rgb_pixels = pygame.surfarray.pixels3d(cloud)
+    rgb_pixels[:, :, :] = (205, 222, 235)
+    del rgb_pixels
+    alpha_pixels = pygame.surfarray.pixels_alpha(cloud)
+    alpha_pixels[:, :] = alpha.T
+    del alpha_pixels
+    return cloud
+
+
+def generate_city_light_texture(
+        suitability: Mapping[str, float], seed: str,
+        size: tuple[int, int]) -> pygame.Surface:
+    """Return a seeded, transparent night-city layer from NASA's light atlas."""
+    width, height = size
+    source = _seeded_asset_pixels(
+        "earth_surface_lights.jpg", size, seed, "cities").astype(np.float32)
+    luminance = (
+        0.2126 * source[..., 0]
+        + 0.7152 * source[..., 1]
+        + 0.0722 * source[..., 2]
+    )
+    light_strength = np.clip((luminance - 31.0) * 3.2, 0, 225)
+    _, colors, highlights = SUITABILITY_STYLES[
+        dominant_suitability(suitability)]
+    color = np.asarray(highlights, dtype=np.float32) * 0.65 + (
+        np.asarray(colors, dtype=np.float32) * 0.35)
+    city = pygame.Surface((width, height), pygame.SRCALPHA)
+    rgb_pixels = pygame.surfarray.pixels3d(city)
+    rgb_pixels[:, :, :] = np.broadcast_to(
+        np.clip(color, 0, 255).astype(np.uint8), (width, height, 3))
+    del rgb_pixels
+    alpha_pixels = pygame.surfarray.pixels_alpha(city)
+    alpha_pixels[:, :] = light_strength.T.astype(np.uint8)
+    del alpha_pixels
+    return city
 
 
 @lru_cache(maxsize=256)
@@ -210,66 +304,39 @@ def generate_planet_surface(
         nx * sun[0] + ny * sun[1] + nz * sun[2])
     brightness = 0.20 + 0.80 * np.maximum(0.0, illumination)
     pixels = texture_pixels[tex_y, tex_x]
-    shaded = np.clip(
-        pixels * brightness[..., None], 0, 255).astype(np.uint8)
+    shaded = pixels * brightness[..., None]
+    cloud_texture = generate_cloud_texture(
+        seed, (texture.get_width(), texture.get_height()))
+    cloud_alpha = pygame.surfarray.array_alpha(cloud_texture).T[
+        tex_y, tex_x].astype(np.float32) / 255.0
+    daylight = np.maximum(0.0, illumination)
+    cloud_opacity = cloud_alpha * (0.22 + 0.58 * daylight)
+    shaded = (
+        shaded * (1.0 - cloud_opacity[..., None])
+        + np.asarray((205, 222, 235), dtype=np.float32)
+        * (0.32 + 0.68 * daylight[..., None])
+        * cloud_opacity[..., None]
+    )
+    if city_lights > 0:
+        city_texture = generate_city_light_texture(
+            suitability, seed, (texture.get_width(), texture.get_height()))
+        city_pixels = _surface_array(city_texture)[tex_y, tex_x]
+        city_alpha = pygame.surfarray.array_alpha(city_texture).T[
+            tex_y, tex_x].astype(np.float32) / 255.0
+        city_alpha *= min(1.0, city_lights) * np.clip(
+            -illumination, 0.0, 1.0) ** 1.2
+        city_alpha *= 1.0 - cloud_opacity * 0.35
+        shaded = (
+            shaded * (1.0 - city_alpha[..., None])
+            + city_pixels * city_alpha[..., None] * 1.15
+        )
+    shaded = np.clip(shaded, 0, 255).astype(np.uint8)
     pixels3d = pygame.surfarray.pixels3d(sphere)
     pixels3d[:, :, :] = np.transpose(shaded, (1, 0, 2))
     del pixels3d
     pixels_alpha = pygame.surfarray.pixels_alpha(sphere)
     pixels_alpha[:, :] = np.transpose(mask.astype(np.uint8) * 255, (1, 0))
     del pixels_alpha
-
-    if city_lights > 0:
-        light_layer = pygame.Surface((size, size), pygame.SRCALPHA)
-        networks = generate_city_networks(seed)
-        active_cities = networks[:max(
-            1, round(len(networks) * min(1.0, city_lights)))]
-        road_color = (255, 166, 75, round(45 + 65 * city_lights))
-        block_color = (255, 197, 112, round(100 + 120 * city_lights))
-        for city_center, blocks, roads, city_radius in active_cities:
-            for start, end in roads:
-                if any(
-                        point[2] <= 0.0
-                        or sum(point[i] * sun[i] for i in range(3)) >= 0.0
-                        for point in (start, end)):
-                    continue
-                pygame.draw.aaline(
-                    light_layer,
-                    road_color,
-                    (round(center + start[0] * radius),
-                     round(center - start[1] * radius)),
-                    (round(center + end[0] * radius),
-                     round(center - end[1] * radius)),
-                )
-
-            city_point = (
-                round(center + city_center[0] * radius),
-                round(center - city_center[1] * radius),
-            )
-            if (city_center[2] > 0.0
-                    and sum(city_center[i] * sun[i] for i in range(3)) < 0.0):
-                glow_radius = max(2, round(city_radius * radius * 0.28))
-                pygame.draw.circle(
-                    light_layer, (255, 145, 55, round(20 + 35 * city_lights)),
-                    city_point, glow_radius)
-            for px, py, pz in blocks:
-                if (pz <= 0.0
-                        or px * sun[0] + py * sun[1] + pz * sun[2] >= 0.0):
-                    continue
-                pygame.draw.circle(
-                    light_layer, block_color,
-                    (round(center + px * radius),
-                     round(center - py * radius)),
-                    max(1, size // 160),
-                )
-        sphere.blit(light_layer)
-        outside_sphere = ~np.transpose(mask, (1, 0))
-        pixels3d = pygame.surfarray.pixels3d(sphere)
-        pixels3d[outside_sphere] = 0
-        del pixels3d
-        pixels_alpha = pygame.surfarray.pixels_alpha(sphere)
-        pixels_alpha[:, :] = np.transpose(mask.astype(np.uint8) * 255, (1, 0))
-        del pixels_alpha
 
     _, _, highlight_color = SUITABILITY_STYLES[
         dominant_suitability(suitability)]
@@ -321,11 +388,6 @@ def generate_planet_texture(
     terrain_variation = sum(
         layer * weight
         for layer, weight in zip(terrain_layers, terrain_weights))
-    clouds = (
-        0.65 * _periodic_value_noise(width, height, 10, 5, generator)
-        + 0.35 * _periodic_value_noise(width, height, 20, 10, generator)
-    )
-
     latitude = np.linspace(-math.pi / 2, math.pi / 2, height)
     latitude = np.broadcast_to(latitude[:, None], (height, width))
     land_mask = np.clip((continents - 0.455) / 0.105, 0.0, 1.0)
@@ -353,10 +415,18 @@ def generate_planet_texture(
     color = color * (1.0 - polar_ice[..., None]) + (
         ice_color * polar_ice[..., None])
 
-    cloud_mask = np.clip((clouds - 0.59) * 2.6, 0.0, 0.42)
-    cloud_color = np.asarray((211, 226, 232), dtype=np.float32)
-    color = color * (1.0 - cloud_mask[..., None]) + (
-        cloud_color * cloud_mask[..., None])
+    surface_reference = _seeded_asset_pixels(
+        "earth_surface.jpg", (width, height), seed, "surface"
+    ).astype(np.float32)
+    surface_luminance = (
+        0.2126 * surface_reference[..., 0]
+        + 0.7152 * surface_reference[..., 1]
+        + 0.0722 * surface_reference[..., 2]
+    )
+    brightness_detail = np.clip(
+        0.78 + 0.38 * surface_luminance / 255.0, 0.78, 1.16)
+    chroma_detail = surface_reference - surface_luminance[..., None]
+    color = color * brightness_detail[..., None] + chroma_detail * 0.12
 
     rgb = np.clip(color, 0, 255).astype(np.uint8)
     return pygame.surfarray.make_surface(

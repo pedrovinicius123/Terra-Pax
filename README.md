@@ -45,9 +45,13 @@ Essa afinidade também orienta a escolha de planetas natais das facções. A
 textura ilustrada é criada localmente a partir do perfil e da identidade do
 planeta; ela aparece no mapa quando ampliado e no painel de detalhes ao
 selecionar um planeta. As pontuações continuam visíveis para comparar a
-adequação de cada mundo. As superfícies combinam continentes e costas com
-ruído em múltiplas escalas, variação de terreno, regiões polares e nuvens,
-mantendo a continuidade da textura ao redor do globo.
+adequação de cada mundo. As superfícies combinam continentes e costas
+procedurais, detalhe de mapas de terreno, nuvens e luzes urbanas em camadas,
+com variação de terreno e regiões polares. A mesma textura equiretangular é
+projetada na vista 3D; as cidades aparecem no lado noturno e as nuvens são
+iluminadas pelo lado diurno. A identidade do planeta desloca e espelha os
+atlas de forma determinística, para variar os mapas sem downloads durante a
+partida.
 
 A galáxia começa com dez facções controladas por IA ou pelo jogador, com
 representantes dos quatro tipos de suitability (**Human**, **Alien**,
@@ -120,6 +124,23 @@ venv/bin/python setup.py build_ext --inplace
 No visualizador, clique e arraste sobre o planeta para girá-lo; use a roda
 para aproximar ou afastar. As luzes de cidades aparecem na face noturna e
 acompanham a rotação da superfície.
+
+### Créditos dos mapas visuais
+
+Os atlas incluídos em `graphics/assets/` são carregados localmente pelo jogo:
+
+- Superfície terrestre: [NASA Earth Observatory — land/ocean/ice, 2048 px](https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57730/land_ocean_ice_2048.jpg).
+- Luzes noturnas: [NASA Blue Marble — land/ocean/ice with lights](https://assets.science.nasa.gov/content/dam/science/esd/eo/content-feature/bluemarble/images/land_ocean_ice_lights_2048.jpg).
+- Nuvens: [NASA Blue Marble — cloud combined](https://assets.science.nasa.gov/content/dam/science/esd/eo/content-feature/bluemarble/images/cloud_combined_2048.jpg).
+- Fundo estelar: [NASA/JPL-Caltech/UCLA — WISE all-sky image (PIA15481)](https://images-assets.nasa.gov/image/PIA15481/PIA15481~orig.jpg).
+
+Os mapas de superfície, nuvens e luzes são referências visuais transformadas
+e combinadas com cores e geografia procedurais; não representam mapas
+astronômicos reais dos planetas do jogo. Créditos e condições de uso devem
+ser verificados para cada imagem e contexto de redistribuição; esta lista
+não declara os arquivos como CC0 nem como livres de direitos de terceiros.
+O uso das imagens não implica endosso da NASA ao jogo. Consulte também a
+[política de imagens e mídia da NASA](https://www.nasa.gov/nasa-brand-center/images-and-media/).
 
 ## Tecnologias
 
