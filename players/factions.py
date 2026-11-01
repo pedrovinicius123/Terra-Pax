@@ -183,6 +183,8 @@ class Faction:
         self.treaties = {}
         self.war_declarations = set()
         self.allies = set()
+        self.pending_peace_offers = set()
+        self.declined_peace_offers = set()
 
         self.controlled_stars = {home_star.name: home_star}
         self.explored_stars = {home_star.name}
@@ -608,11 +610,35 @@ class Faction:
         other.treaties.setdefault(self.name, set()).add(treaty)
         return True
 
+    def propose_peace(self, other):
+        if (other is self or self.eliminated or other.eliminated
+                or self.diplomacy.get(other.name) != DiplomacyStatus.WAR
+                or self.name in other.declined_peace_offers):
+            return False
+        other.pending_peace_offers.add(self.name)
+        return True
+
+    def respond_to_peace_offer(self, other, accept):
+        if other.name not in self.pending_peace_offers:
+            return False
+        self.pending_peace_offers.discard(other.name)
+        if accept:
+            if self.diplomacy.get(other.name) != DiplomacyStatus.WAR:
+                return False
+            self.update_diplomacy(other, DiplomacyStatus.PEACE)
+        else:
+            self.declined_peace_offers.add(other.name)
+        return True
+
     def update_diplomacy(self, other, new_status):
         old_status = self.diplomacy.get(other.name, DiplomacyStatus.NEUTRAL)
         self.diplomacy[other.name] = new_status
         other.diplomacy[self.name] = new_status
         if new_status == DiplomacyStatus.WAR:
+            self.pending_peace_offers.discard(other.name)
+            other.pending_peace_offers.discard(self.name)
+            self.declined_peace_offers.discard(other.name)
+            other.declined_peace_offers.discard(self.name)
             self.war_declarations.add(other.name)
             other.war_declarations.add(self.name)
             self.allies.discard(other.name)
@@ -628,6 +654,10 @@ class Faction:
             other.war_declarations.discard(self.name)
         elif new_status in (DiplomacyStatus.NEUTRAL,
                             DiplomacyStatus.PEACE):
+            self.pending_peace_offers.discard(other.name)
+            other.pending_peace_offers.discard(self.name)
+            self.declined_peace_offers.discard(other.name)
+            other.declined_peace_offers.discard(self.name)
             self.war_declarations.discard(other.name)
             other.war_declarations.discard(self.name)
             self.allies.discard(other.name)

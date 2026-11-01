@@ -78,3 +78,6 @@ class PlayerController(BaseController):
 
     def make_peace(self, other):
         self.faction.update_diplomacy(other, DiplomacyStatus.PEACE)
+
+    def respond_to_peace_offer(self, other, accept):
+        return self.faction.respond_to_peace_offer(other, accept)

@@ -68,6 +68,10 @@ A galáxia começa com dez facções controladas por IA ou pelo jogador, com
 representantes dos quatro tipos de suitability (**Human**, **Alien**,
 **Hybrid** e **Robot**).
 
+Ao iniciar, escolha uma galáxia padrão com 60 sistemas e 10 facções ou uma
+galáxia compacta com 30 sistemas e 6 facções. A opção compacta também inclui
+os quatro tipos de suitability.
+
 Antes de cada partida, escolha qualquer uma das facções para comandar. As
 demais recebem controladores de IA.
 
@@ -105,8 +109,9 @@ mapa quanto no visualizador 3D.
 - Em **Diplom.**, melhore relações por 25 de Energia (+10, até 100), proponha
   pactos de não agressão (relação 45) e acordos comerciais (relação 55), ou
   declare guerra. Alianças exigem acordo comercial e relação 70; acordos
-  comerciais aumentam a pesquisa em 5% por parceiro, até 50%. A IA também
-  negocia e pode encerrar guerras quando as relações permitem.
+  comerciais aumentam a pesquisa em 5% por parceiro, até 50%. Durante uma
+  guerra, uma facção de IA pode propor paz; aceite ou recuse a proposta na
+  seção de diplomacia. Uma recusa vale até o fim daquela guerra.
 - `Espaço` pausa ou retoma a simulação; `F11` alterna tela cheia.
 - Os botões no topo controlam pausa e velocidade. Os filtros do mapa alternam
   entre todos os planetas, os da sua facção e os ainda livres.

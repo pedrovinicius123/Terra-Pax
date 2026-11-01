@@ -87,8 +87,12 @@ class AIController(BaseController):
             if status == DiplomacyStatus.WAR:
                 if relation < 35 and their_power > my_power * 1.1:
                     relation = f.adjust_relation(other, 1)
-                if relation >= 35 and their_power > my_power * 1.1:
-                    f.update_diplomacy(other, DiplomacyStatus.PEACE)
+                if (relation >= 35 and their_power > my_power * 1.1
+                        and other.name not in other.declined_peace_offers):
+                    if other.is_human:
+                        f.propose_peace(other)
+                    else:
+                        f.update_diplomacy(other, DiplomacyStatus.PEACE)
                 continue
 
             if status == DiplomacyStatus.ALLY:

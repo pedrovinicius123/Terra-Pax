@@ -6,6 +6,7 @@ from players.factions import Faction, FactionType
 from game_state import GameState
 from controllers.player import PlayerController
 from controllers.ai import AIController
+from ui.galaxy_selection import GalaxySelectionScreen
 from ui.faction_selection import FactionSelectionScreen
 from ui.interface import GameUI
 
@@ -48,6 +49,7 @@ FACTION_DEFS = [
     ("Ninhada Vórtice", FactionType.ALIEN, False, "#16a085", 0.70,
      "Exploradores de mundos extremos"),
 ]
+COMPACT_GALAXY_FACTION_INDICES = (0, 1, 2, 4, 5, 7)
 
 
 def main():
@@ -57,11 +59,46 @@ def main():
     pygame.display.set_caption("Terra Pax")
     clock = pygame.time.Clock()
 
-    game_map, stars = init_map(60, 4000, 440)
+    galaxy_selection = GalaxySelectionScreen(screen)
+    galaxy_size = None
+    selecting_galaxy = True
+    while selecting_galaxy:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                selecting_galaxy = False
+                break
+            if event.type == pygame.VIDEORESIZE:
+                W, H = event.w, event.h
+                screen = pygame.display.set_mode((W, H), pygame.RESIZABLE)
+                galaxy_selection.on_resize(screen)
+                continue
+            selected_size = galaxy_selection.handle_event(event)
+            if selected_size is not None:
+                galaxy_size = selected_size
+                selecting_galaxy = False
+                break
+        if selecting_galaxy:
+            galaxy_selection.draw()
+            pygame.display.flip()
+            clock.tick(60)
+
+    if galaxy_size is None:
+        pygame.quit()
+        return
+
+    if galaxy_size == "compact":
+        game_map, stars = init_map(30, 2600, 320)
+        faction_defs = [
+            FACTION_DEFS[index]
+            for index in COMPACT_GALAXY_FACTION_INDICES
+        ]
+    else:
+        game_map, stars = init_map(60, 4000, 440)
+        faction_defs = FACTION_DEFS
 
     factions = []
     used_names = set()
-    for name, ftype, is_human, color, _agg, desc in FACTION_DEFS:
+    for name, ftype, is_human, color, _agg, desc in faction_defs:
         sp = pick_home_planet(stars, ftype, used_names)
         
         if not sp:
@@ -110,7 +147,7 @@ def main():
         return
 
     player_ctrl = PlayerController(player_faction)
-    agg_map = {d[0]: d[4] for d in FACTION_DEFS}
+    agg_map = {d[0]: d[4] for d in faction_defs}
     for f in factions:
         f.is_human = f is player_faction
         if f is player_faction:

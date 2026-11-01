@@ -377,6 +377,12 @@ class GameUI:
         self.log_msg(f"Paz: {other.name}")
         self._rebuild_panel_buttons()
 
+    def _respond_to_peace_offer(self, other, accept):
+        if self.player.respond_to_peace_offer(other, accept):
+            decision = "aceita" if accept else "recusada"
+            self.log_msg(f"Proposta de paz {decision}: {other.name}")
+        self._rebuild_panel_buttons()
+
     def _propose_alliance(self, other):
         if self.player.propose_alliance(other):
             self.log_msg(f"Aliança: {other.name}")
@@ -664,9 +670,24 @@ class GameUI:
                     self.f_small, color=ratio_col))
                 y += 16
                 if status == DiplomacyStatus.WAR:
-                    self._panel_buttons.append(Button(
-                        (x0, y, 72, 20), "Paz",
-                        lambda o=other: self._make_peace(o)))
+                    if other.name in f.pending_peace_offers:
+                        self._panel_buttons.append(_FakeLabel(
+                            (x0, y, w, 16),
+                            f"{other.name[:18]} propõe encerrar a guerra",
+                            self.f_small, color=C.ACCENT))
+                        y += 18
+                        self._panel_buttons.append(Button(
+                            (x0, y, 82, 20), "Aceitar paz",
+                            lambda o=other: self._respond_to_peace_offer(
+                                o, True)))
+                        self._panel_buttons.append(Button(
+                            (x0 + 88, y, 82, 20), "Recusar",
+                            lambda o=other: self._respond_to_peace_offer(
+                                o, False)))
+                    else:
+                        self._panel_buttons.append(Button(
+                            (x0, y, 90, 20), "Paz",
+                            lambda o=other: self._make_peace(o)))
                 elif status == DiplomacyStatus.ALLY:
                     self._panel_buttons.append(Button(
                         (x0, y, 140, 20), "Romper aliança",
