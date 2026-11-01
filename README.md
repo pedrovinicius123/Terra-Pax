@@ -47,18 +47,21 @@ planeta; ela aparece no mapa quando ampliado e no painel de detalhes ao
 selecionar um planeta. As pontuações continuam visíveis para comparar a
 adequação de cada mundo.
 
-Os sistemas estelares são distribuídos por uma galáxia de 3000 unidades. O
-alcance colonial inicial é de 600 unidades e aumenta em 100 a cada nível de
-FTL acima do primeiro. Estrelas e planetas têm raios reduzidos para destacar
-melhor as distâncias entre sistemas.
+Os sistemas estelares são distribuídos por uma galáxia de 4000 unidades, com
+espaçamento mínimo proporcional à escala da galáxia e inverso à raiz da
+quantidade de estrelas. O alcance colonial inicial é de 600 unidades e aumenta
+em 100 a cada nível de FTL acima do primeiro.
 
 ## Interface e controles
 
 - Clique em uma estrela ou planeta para selecionar e ver o sistema e os
   detalhes do mundo.
-- Use a roda do mouse para ampliar/reduzir o mapa e arraste para navegar.
-- `Espaço` pausa ou retoma a simulação; `R` redefine o zoom; `F11` alterna
-  tela cheia.
+- Use a roda do mouse para ampliar/reduzir o mapa (zoom inicial 0,45 e máximo
+  120x) e arraste para navegar. `R` recentraliza a galáxia e restaura o zoom.
+- As abas **Frota** e **Colônias** organizam naves por função e mundos entre
+  capital e colônias; role a roda sobre a lista para navegar e selecione uma
+  linha para focar a nave ou o mundo no mapa.
+- `Espaço` pausa ou retoma a simulação; `F11` alterna tela cheia.
 - Os botões no topo controlam pausa e velocidade. Os filtros do mapa alternam
   entre todos os planetas, os da sua facção e os ainda livres.
 - As abas laterais reúnem recursos, sistemas, pesquisa, frota, construção e

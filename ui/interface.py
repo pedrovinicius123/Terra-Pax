@@ -3,7 +3,7 @@ import numpy as np
 import pygame
 
 from players.factions import DESIGNS, DiplomacyStatus
-from players.ships import ColonyShip
+from players.ships import ColonyShip, Scout, Transport, Warship
 from graphics.planet_generator import (
     dominant_suitability,
     generate_planet_surface,
@@ -89,6 +89,10 @@ class GameUI:
     PANEL_W = 420
     TOP_H   = 36
     BOT_H   = 144
+    DEFAULT_ZOOM = 0.45
+    MIN_ZOOM = 0.05
+    MAX_ZOOM = 120.0
+    PANEL_LIST_TOP = TOP_H + 86
 
     def __init__(self, screen, state, player_ctrl):
         self.screen = screen
@@ -97,7 +101,7 @@ class GameUI:
         self.player = player_ctrl
         self.faction = player_ctrl.faction
 
-        self.zoom = 0.35
+        self.zoom = self.DEFAULT_ZOOM
         self.off_x = 0
         self.off_y = 0
         self.dragging = False
@@ -108,15 +112,20 @@ class GameUI:
         self.filter_mode = 'all'
 
         self.tabs = ['resources', 'system', 'research', 'fleet',
-                     'build', 'war']
+                     'colonies', 'build', 'war']
         self.tab_labels = {
             'resources': 'Recursos', 'system': 'Sistema',
             'research': 'Pesquisa', 'fleet': 'Frota',
+            'colonies': 'Colônias',
             'build': 'Construir', 'war': 'Guerra',
         }
         self.active_tab = 'resources'
+        self._scrollable_tabs = {'fleet', 'colonies'}
+        self._panel_scroll = {tab: 0 for tab in self._scrollable_tabs}
+        self._panel_content_height = 0
 
         self.f_small = pygame.font.SysFont('Consolas', 11)
+        self.f_tab   = pygame.font.SysFont('Consolas', 10)
         self.f       = pygame.font.SysFont('Consolas', 13)
         self.f_med   = pygame.font.SysFont('Consolas', 14, bold=True)
         self.f_title = pygame.font.SysFont('Consolas', 18, bold=True)
@@ -135,6 +144,7 @@ class GameUI:
         self._build_filter_buttons()
         self._build_tab_buttons()
         self._rebuild_panel_buttons()
+        self._center_map_on_galaxy()
 
     def on_resize(self, screen):
         self.screen = screen
@@ -195,6 +205,35 @@ class GameUI:
                 Button((bx, y, w, 24), self.tab_labels[t],
                        lambda tab=t: self._switch_tab(tab)))
 
+    def _center_map_on_galaxy(self):
+        if not self.state.stars:
+            return
+        self.off_x = sum(star.position[0] for star in self.state.stars) / len(
+            self.state.stars)
+        self.off_y = sum(star.position[1] for star in self.state.stars) / len(
+            self.state.stars)
+
+    def _panel_viewport(self):
+        panel_x = self.W - self.PANEL_W
+        return pygame.Rect(
+            panel_x + 6, self.PANEL_LIST_TOP, self.PANEL_W - 24,
+            max(0, self.H - self.PANEL_LIST_TOP - 10),
+        )
+
+    def _visible_panel_rect(self, button):
+        if self.active_tab in self._scrollable_tabs:
+            return button.rect.move(0, -self._panel_scroll[self.active_tab])
+        return button.rect
+
+    def _scroll_active_panel(self, amount):
+        if self.active_tab not in self._scrollable_tabs:
+            return
+        viewport = self._panel_viewport()
+        max_scroll = max(0, self._panel_content_height - viewport.height)
+        self._panel_scroll[self.active_tab] = max(
+            0, min(max_scroll,
+                   self._panel_scroll[self.active_tab] + amount))
+
     def _toggle_pause(self):
         self.state.paused = not self.state.paused
         self.log_msg("Pausado" if self.state.paused else "Retomado")
@@ -222,7 +261,16 @@ class GameUI:
 
     def _select_ship(self, ship):
         self.player.selected_ship = ship
+        self.off_x, self.off_y = ship.abs_position
         self.log_msg(f"Selecionada {ship.ship_id}")
+
+    def _select_colony(self, planet):
+        self.selected_star = planet.parent_star
+        self.selected_planet = planet
+        self.player.select(planet.parent_star, planet)
+        self.off_x, self.off_y = planet.parent_star.position
+        self._rebuild_panel_buttons()
+        self._rebuild_action_buttons()
 
     def _send_colonizer_to(self, planet):
         star = planet.parent_star
@@ -297,6 +345,7 @@ class GameUI:
         content_y = self.TOP_H + 42
         w = self.PANEL_W - 20
         f = self.faction
+        self._panel_content_height = 0
 
         if self.active_tab == 'research':
             y = content_y + 24   # pula linha do cabeçalho
@@ -328,15 +377,95 @@ class GameUI:
                 y += 14
 
         elif self.active_tab == 'fleet':
-            y = content_y + 22
-            for ship in list(f.ships.values()):
-                design = DESIGNS.get(ship.design_key, {})
-                btn = Button((x0, y, w, 20),
-                             f"{ship.ship_id} {design.get('display','?')} "
-                             f"[{ship.activity}]",
-                             lambda s=ship: self._select_ship(s))
-                self._panel_buttons.append(btn)
+            viewport = self._panel_viewport()
+            y = viewport.top + 8
+            groups = (
+                ("EXPLORAÇÃO", Scout),
+                ("COLONIZAÇÃO", ColonyShip),
+                ("COMBATE", Warship),
+                ("LOGÍSTICA", Transport),
+            )
+            ships = [ship for ship in list(f.ships.values()) if ship.alive]
+            grouped = set()
+            for title, ship_type in groups:
+                members = [ship for ship in ships
+                           if isinstance(ship, ship_type)]
+                grouped.update(id(ship) for ship in members)
+                self._panel_buttons.append(_FakeLabel(
+                    (x0, y, w, 18), f"{title}  ·  {len(members)}",
+                    self.f_small, color=C.ACCENT))
                 y += 22
+                if not members:
+                    self._panel_buttons.append(_FakeLabel(
+                        (x0 + 8, y, w - 8, 18),
+                        "Nenhuma nave nesta seção", self.f_small))
+                    y += 20
+                    continue
+                for ship in sorted(members, key=lambda item: item.ship_id):
+                    design = DESIGNS.get(ship.design_key, {})
+                    self._panel_buttons.append(Button(
+                        (x0 + 4, y, w - 12, 24),
+                        f"{ship.ship_id}  {design.get('display', '?')}",
+                        lambda selected=ship: self._select_ship(selected),
+                    ))
+                    y += 25
+                    self._panel_buttons.append(_FakeLabel(
+                        (x0 + 10, y, w - 18, 16),
+                        f"{ship.activity}  ·  casco {ship.hull:.0f}/"
+                        f"{ship.max_hull:.0f}",
+                        self.f_small))
+                    y += 20
+            others = [ship for ship in ships if id(ship) not in grouped]
+            if others:
+                self._panel_buttons.append(_FakeLabel(
+                    (x0, y, w, 18), f"OUTRAS  ·  {len(others)}",
+                    self.f_small, color=C.ACCENT))
+                y += 22
+                for ship in sorted(others, key=lambda item: item.ship_id):
+                    design = DESIGNS.get(ship.design_key, {})
+                    self._panel_buttons.append(Button(
+                        (x0 + 4, y, w - 12, 24),
+                        f"{ship.ship_id}  {design.get('display', '?')}",
+                        lambda selected=ship: self._select_ship(selected),
+                    ))
+                    y += 28
+            self._panel_content_height = y - viewport.top
+
+        elif self.active_tab == 'colonies':
+            viewport = self._panel_viewport()
+            y = viewport.top + 8
+            colonies = sorted(f.colonies.values(), key=lambda p: p.name)
+            home = f.home_planet
+            sections = (
+                ("CAPITAL", [p for p in colonies if p is home]),
+                ("COLÔNIAS", [p for p in colonies if p is not home]),
+            )
+            for title, members in sections:
+                self._panel_buttons.append(_FakeLabel(
+                    (x0, y, w, 18), f"{title}  ·  {len(members)}",
+                    self.f_small, color=C.ACCENT))
+                y += 22
+                if not members:
+                    self._panel_buttons.append(_FakeLabel(
+                        (x0 + 8, y, w - 8, 18),
+                        "Nenhuma colônia nesta seção", self.f_small))
+                    y += 20
+                    continue
+                for planet in members:
+                    self._panel_buttons.append(Button(
+                        (x0 + 4, y, w - 12, 24), planet.name,
+                        lambda selected=planet: self._select_colony(selected),
+                    ))
+                    y += 25
+                    self._panel_buttons.append(_FakeLabel(
+                        (x0 + 10, y, w - 18, 16),
+                        f"{planet.parent_star.name}  ·  pop "
+                        f"{planet.population:.0f}  ·  "
+                        f"desenv. {planet.developement:.1f}  ·  "
+                        f"defesa {planet.defense:.0f}",
+                        self.f_small))
+                    y += 20
+            self._panel_content_height = y - viewport.top
 
         elif self.active_tab == 'system':
             if self.selected_star is None:
@@ -451,6 +580,12 @@ class GameUI:
                         (x0 + 86, y, 100, 20), "Aliança",
                         lambda o=other: self._propose_alliance(o)))
                     y += 22
+        if self.active_tab in self._scrollable_tabs:
+            viewport = self._panel_viewport()
+            max_scroll = max(
+                0, self._panel_content_height - viewport.height)
+            self._panel_scroll[self.active_tab] = min(
+                self._panel_scroll[self.active_tab], max_scroll)
 
     # ---------- Coordenadas ----------
     def world_to_screen(self, x, y):
@@ -483,11 +618,16 @@ class GameUI:
     def handle_event(self, event):
         if event.type == pygame.MOUSEMOTION:
             all_btns = (self._top_buttons + self._filter_buttons
-                        + self._tab_buttons + self._panel_buttons
-                        + self._action_buttons)
+                        + self._tab_buttons + self._action_buttons)
             for b in all_btns:
+                b.hover = b.rect.collidepoint(event.pos)
+            viewport = self._panel_viewport()
+            for b in self._panel_buttons:
                 if hasattr(b, 'hover'):
-                    b.hover = b.rect.collidepoint(event.pos)
+                    b.hover = (
+                        viewport.collidepoint(event.pos)
+                        and self._visible_panel_rect(b).collidepoint(event.pos)
+                    )
             mx, my = event.pos
             if mx < self.W - self.PANEL_W and my > self.TOP_H:
                 wx, wy = self.screen_to_world(mx, my)
@@ -507,20 +647,48 @@ class GameUI:
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1:
                 for b in (self._top_buttons + self._filter_buttons
-                          + self._tab_buttons + self._panel_buttons
-                          + self._action_buttons):
+                          + self._tab_buttons + self._action_buttons):
                     if hasattr(b, 'hit') and b.hit(event.pos):
                         b.cb()
                         return
+                viewport = self._panel_viewport()
+                if (self.active_tab in self._scrollable_tabs
+                        and viewport.collidepoint(event.pos)):
+                    for button in self._panel_buttons:
+                        if (isinstance(button, Button)
+                                and self._visible_panel_rect(button).collidepoint(
+                                    event.pos)
+                                and button.enabled()):
+                            button.cb()
+                            return
+                elif self.active_tab not in self._scrollable_tabs:
+                    for button in self._panel_buttons:
+                        if (hasattr(button, 'hit')
+                                and button.hit(event.pos)):
+                            button.cb()
+                            return
                 if (event.pos[0] < self.W - self.PANEL_W
                         and event.pos[1] > self.TOP_H):
                     self._handle_map_click(event.pos)
                     self.dragging = True
                     self.last_mouse = event.pos
             elif event.button == 4:
-                self._zoom_at(event.pos, +1)
+                if event.pos[0] >= self.W - self.PANEL_W:
+                    self._scroll_active_panel(-48)
+                else:
+                    self._zoom_at(event.pos, +1)
             elif event.button == 5:
-                self._zoom_at(event.pos, -1)
+                if event.pos[0] >= self.W - self.PANEL_W:
+                    self._scroll_active_panel(48)
+                else:
+                    self._zoom_at(event.pos, -1)
+
+        elif event.type == pygame.MOUSEWHEEL:
+            pos = pygame.mouse.get_pos()
+            if pos[0] >= self.W - self.PANEL_W:
+                self._scroll_active_panel(-event.y * 48)
+            else:
+                self._zoom_at(pos, event.y)
 
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             self.dragging = False
@@ -529,12 +697,15 @@ class GameUI:
             if event.key == pygame.K_SPACE:
                 self._toggle_pause()
             elif event.key == pygame.K_r:
-                self.zoom, self.off_x, self.off_y = 0.35, 0, 0
+                self.zoom = self.DEFAULT_ZOOM
+                self._center_map_on_galaxy()
                 self._map_planet_surfaces.clear()
 
     def _zoom_at(self, pos, direction):
+        if direction == 0:
+            return
         wx, wy = self.screen_to_world(*pos)
-        self.zoom = max(0.05, min(80.0,
+        self.zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM,
                          self.zoom * (1.2 if direction > 0 else 1 / 1.2)))
         self._map_planet_surfaces.clear()
         self.off_x = wx - (pos[0] - self.W / 2) / self.zoom
@@ -598,6 +769,8 @@ class GameUI:
     # ---------- Render ----------
     def render(self):
         self._sync_events()
+        if self.active_tab in self._scrollable_tabs:
+            self._rebuild_panel_buttons()
         self._rebuild_action_buttons()
 
         self.screen.fill(C.BG)
@@ -616,14 +789,60 @@ class GameUI:
             self._filter_buttons[i].draw(
                 self.screen, self.f, active=(mode == self.filter_mode))
         for i, t in enumerate(self.tabs):
-            self._tab_buttons[i].draw(self.screen, self.f,
+            self._tab_buttons[i].draw(self.screen, self.f_tab,
                                       active=(t == self.active_tab))
-        for b in self._panel_buttons:
-            if isinstance(b, _FakeLabel):
-                b.draw(self.screen)
-            else:
-                b.draw(self.screen, self.f,
-                       active=getattr(b, '_active', False))
+        self._draw_panel_buttons()
+
+    def _draw_panel_buttons(self):
+        if self.active_tab not in self._scrollable_tabs:
+            for button in self._panel_buttons:
+                if isinstance(button, _FakeLabel):
+                    button.draw(self.screen)
+                else:
+                    button.draw(self.screen, self.f,
+                                active=getattr(button, '_active', False))
+            return
+
+        viewport = self._panel_viewport()
+        old_clip = self.screen.get_clip()
+        mouse_pos = pygame.mouse.get_pos()
+        self.screen.set_clip(viewport)
+        try:
+            for button in self._panel_buttons:
+                original_rect = button.rect
+                button.rect = self._visible_panel_rect(button)
+                try:
+                    if hasattr(button, 'hover'):
+                        button.hover = (
+                            viewport.collidepoint(mouse_pos)
+                            and button.rect.collidepoint(mouse_pos)
+                        )
+                        button.draw(
+                            self.screen, self.f,
+                            active=getattr(button, '_active', False),
+                        )
+                    else:
+                        button.draw(self.screen)
+                finally:
+                    button.rect = original_rect
+        finally:
+            self.screen.set_clip(old_clip)
+
+        if self._panel_content_height <= viewport.height:
+            return
+        track = pygame.Rect(self.W - 12, viewport.top, 4, viewport.height)
+        pygame.draw.rect(self.screen, C.BUTTON, track, border_radius=2)
+        thumb_height = min(
+            viewport.height,
+            max(28, int(viewport.height ** 2 / self._panel_content_height)),
+        )
+        max_scroll = self._panel_content_height - viewport.height
+        thumb_offset = int(max(
+            0, viewport.height - thumb_height)
+            * self._panel_scroll[self.active_tab] / max_scroll)
+        thumb = pygame.Rect(
+            track.x, track.y + thumb_offset, track.width, thumb_height)
+        pygame.draw.rect(self.screen, C.ACCENT, thumb, border_radius=2)
 
     def _hex_to_rgb(self, hex_str):
         h = hex_str.lstrip('#')
@@ -897,10 +1116,21 @@ class GameUI:
         elif self.active_tab == 'fleet':
             self.screen.blit(self.f_med.render(
                 f"FROTA ({len(f.ships)})", True, C.ACCENT), (x0 + 10, y))
-            y += 18
             self.screen.blit(self.f_small.render(
-                f"Colonizadores ociosos: {len(f.idle_colony_ships())}",
-                True, C.DIM), (x0 + 10, y))
+                f"Ativas: {sum(1 for ship in f.ships.copy().values() if ship.alive)}"
+                f"  ·  Colonizadores ociosos: "
+                f"{len(f.idle_colony_ships())}",
+                True, C.DIM), (x0 + 10, y + 20))
+
+        elif self.active_tab == 'colonies':
+            population = sum(
+                planet.population for planet in f.colonies.values())
+            self.screen.blit(self.f_med.render(
+                f"COLÔNIAS ({len(f.colonies)})", True, C.ACCENT),
+                (x0 + 10, y))
+            self.screen.blit(self.f_small.render(
+                f"População total: {population:.0f}",
+                True, C.DIM), (x0 + 10, y + 20))
 
         elif self.active_tab == 'build':
             self.screen.blit(self.f_med.render("CONSTRUIR",

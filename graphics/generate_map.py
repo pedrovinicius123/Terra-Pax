@@ -43,13 +43,29 @@ def generate_traditional_star_name():
 def init_map(n_stars: int, sector_size: int, min_dist: int):
     stars = []
     planet_letters = "bcdefghi"
+    star_positions = []
+    minimum_system_spacing = (
+        0.4 * sector_size / math.sqrt(max(1, n_stars)))
+    max_placement_attempts = max(100, n_stars * 20)
 
     for _ in range(n_stars):
-        pos = [random.uniform(0, sector_size), random.uniform(0, sector_size)]
+        for attempt in range(max_placement_attempts):
+            pos = [random.uniform(0, sector_size),
+                   random.uniform(0, sector_size)]
+            if all(math.dist(pos, other) >= minimum_system_spacing
+                   for other in star_positions):
+                star_positions.append(pos)
+                break
+        else:
+            raise ValueError(
+                f"Could not place {n_stars} stars with minimum spacing "
+                f"{minimum_system_spacing:.1f} in a {sector_size} unit sector "
+                f"after {attempt + 1} attempts"
+            )
 
-        # Mantém os corpos celestes pequenos em relação à escala da galáxia.
-        star_r = random.uniform(0.0028, 0.0042) * sector_size
-        planet_r = random.uniform(0.00045, 0.0008) * sector_size
+        # Realista: estrela ~10x o raio de um planeta; sistema compacto.
+        star_r = random.uniform(0.007, 0.011) *sector_size  # 10.5–16.5 u
+        planet_r = random.uniform(0.0015, 0.0030) *sector_size # 2.25–4.5 u
 
         star = Star(
             name=generate_traditional_star_name(),

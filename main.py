@@ -48,7 +48,7 @@ def main():
     pygame.display.set_caption("Terra Pax")
     clock = pygame.time.Clock()
 
-    game_map, stars = init_map(60, 3000, 330)
+    game_map, stars = init_map(60, 4000, 440)
 
     factions = []
     used_names = set()
