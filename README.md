@@ -13,10 +13,19 @@ Com Python 3.12 ou superior, em uma versão compatível com o NetworkX 3.7
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python main.py
+python setup.py build_ext --inplace
+python run_game.py
 ```
 
-No Windows, ative o ambiente com `.venv\Scripts\activate`.
+O comando compila os módulos executáveis do jogo e os kernels de logística
+com Cython; usa otimização nativa (`-O3` no GCC/Clang, `/O2` no MSVC).
+`run_game.py` verifica que o módulo principal compilado está sendo usado.
+No Windows, ative o ambiente com `.venv\Scripts\activate` antes de executar
+os comandos.
+
+As camadas leves de compatibilidade da logística continuam em Python e
+delegam o planejamento de transferências aos kernels Cython. Para executar
+diretamente a versão Python durante desenvolvimento, use `python main.py`.
 
 ## Tempo e calendário
 
@@ -46,11 +55,13 @@ textura ilustrada é criada localmente a partir do perfil e da identidade do
 planeta; ela aparece no mapa quando ampliado e no painel de detalhes ao
 selecionar um planeta. As pontuações continuam visíveis para comparar a
 adequação de cada mundo. As superfícies combinam continentes e costas
-procedurais, detalhe de mapas de terreno, nuvens e luzes urbanas em camadas,
-com variação de terreno e regiões polares. A mesma textura equiretangular é
-projetada na vista 3D; as cidades aparecem no lado noturno e as nuvens são
-iluminadas pelo lado diurno. A identidade do planeta desloca e espelha os
-atlas de forma determinística, para variar os mapas sem downloads durante a
+gerados com ruído procedural tridimensional amostrado sobre uma esfera. Isso
+mantém os continentes contínuos nas bordas do mapa e nos polos, com proporção
+de terra, costas e relevo determinísticos por planeta. As cidades são
+aglomerados e estradas gerados sobre essa mesma máscara de terra, não sobre
+mapas de luzes terrestres. Na vista 3D, as camadas são interpoladas ao girar;
+as luzes aparecem no lado noturno e as nuvens no diurno. Os atlas de nuvens e
+estrelas continuam sendo carregados localmente, sem downloads durante a
 partida.
 
 A galáxia começa com dez facções controladas por IA ou pelo jogador, com
@@ -67,10 +78,9 @@ em 100 a cada nível de FTL acima do primeiro. As estrelas, planetas e órbitas
 foram reduzidos para manter os astros pequenos em relação às distâncias entre
 sistemas.
 
-Colônias recebem redes urbanas no lado noturno dos planetas: centros
-metropolitanos, quadras iluminadas e vias conectadas, em vez de pontos
-dispersos. A quantidade e o brilho crescem conforme população e
-desenvolvimento, tanto no mapa quanto no visualizador 3D.
+Colônias recebem luzes urbanas procedurais em cidades geradas sobre continentes
+habitáveis. O brilho cresce conforme população e desenvolvimento, tanto no
+mapa quanto no visualizador 3D.
 
 ## Interface e controles
 
@@ -88,6 +98,10 @@ desenvolvimento, tanto no mapa quanto no visualizador 3D.
   linha para focar a nave ou o mundo no mapa.
 - Em **Visual**, ajuste o detalhe das texturas de 1 a 8; os níveis maiores
   aumentam a resolução das texturas e a malha do visualizador 3D.
+- Em **Construção**, escolha entre seis designs de combate (corveta, fragata,
+  destroier, cruzador, encouraçado e cruzador de batalha), além de naves
+  civis/de exploração, transporte e colonização. Os sprites são coloridos pela
+  facção e a lista pode ser rolada.
 - Em **Diplom.**, melhore relações por 25 de Energia (+10, até 100), proponha
   pactos de não agressão (relação 45) e acordos comerciais (relação 55), ou
   declare guerra. Alianças exigem acordo comercial e relação 70; acordos
@@ -123,23 +137,28 @@ venv/bin/python setup.py build_ext --inplace
 
 No visualizador, clique e arraste sobre o planeta para girá-lo; use a roda
 para aproximar ou afastar. As luzes de cidades aparecem na face noturna e
-acompanham a rotação da superfície.
+acompanham a rotação da superfície. Os mapas e sprites são carregados dos
+assets locais; o jogo continua funcionando offline.
 
-### Créditos dos mapas visuais
+### Créditos dos assets visuais
 
-Os atlas incluídos em `graphics/assets/` são carregados localmente pelo jogo:
+Os assets abaixo são carregados localmente pelo jogo:
 
-- Superfície terrestre: [NASA Earth Observatory — land/ocean/ice, 2048 px](https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57730/land_ocean_ice_2048.jpg).
-- Luzes noturnas: [NASA Blue Marble — land/ocean/ice with lights](https://assets.science.nasa.gov/content/dam/science/esd/eo/content-feature/bluemarble/images/land_ocean_ice_lights_2048.jpg).
 - Nuvens: [NASA Blue Marble — cloud combined](https://assets.science.nasa.gov/content/dam/science/esd/eo/content-feature/bluemarble/images/cloud_combined_2048.jpg).
 - Fundo estelar: [NASA/JPL-Caltech/UCLA — WISE all-sky image (PIA15481)](https://images-assets.nasa.gov/image/PIA15481/PIA15481~orig.jpg).
+- Sprites de naves: [Kenney — Space Shooter Extension](https://kenney.nl/assets/space-shooter-extension), licença [CC0](https://creativecommons.org/publicdomain/zero/1.0/); a licença original acompanha os arquivos em `graphics/assets/ships/LICENSE.txt`.
 
-Os mapas de superfície, nuvens e luzes são referências visuais transformadas
-e combinadas com cores e geografia procedurais; não representam mapas
-astronômicos reais dos planetas do jogo. Créditos e condições de uso devem
-ser verificados para cada imagem e contexto de redistribuição; esta lista
-não declara os arquivos como CC0 nem como livres de direitos de terceiros.
-O uso das imagens não implica endosso da NASA ao jogo. Consulte também a
+Os antigos atlas terrestres de superfície e luzes ainda podem existir em
+`graphics/assets/`, mas não são usados na geração dos planetas: superfície
+[NASA Earth Observatory](https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57730/land_ocean_ice_2048.jpg)
+e luzes
+[NASA Blue Marble](https://assets.science.nasa.gov/content/dam/science/esd/eo/content-feature/bluemarble/images/land_ocean_ice_lights_2048.jpg).
+Continentes, relevo e cidades são criados localmente a partir da semente do
+mundo. Os arquivos NASA de nuvens e céu são apenas camadas visuais e não
+definem sua geografia. Créditos e condições de uso devem ser verificados para
+cada imagem e contexto de redistribuição; esta lista não declara os arquivos
+NASA como CC0 nem como livres de direitos de terceiros. O uso das imagens
+não implica endosso da NASA ao jogo. Consulte também a
 [política de imagens e mídia da NASA](https://www.nasa.gov/nasa-brand-center/images-and-media/).
 
 ## Tecnologias

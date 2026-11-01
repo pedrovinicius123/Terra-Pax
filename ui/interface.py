@@ -9,6 +9,7 @@ from graphics.planet_generator import (
     dominant_suitability,
     generate_planet_surface,
 )
+from graphics.ship_sprites import get_ship_sprite
 from logistics.game_3d import PlanetViewer3D
 
 
@@ -178,7 +179,7 @@ class GameUI:
         }
         self.active_tab = 'resources'
         self.texture_detail = 3
-        self._scrollable_tabs = {'fleet', 'colonies', 'war'}
+        self._scrollable_tabs = {'build', 'fleet', 'colonies', 'war'}
         self._panel_scroll = {tab: 0 for tab in self._scrollable_tabs}
         self._panel_content_height = 0
 
@@ -449,7 +450,8 @@ class GameUI:
                 self._reset_research_weights))
 
         elif self.active_tab == 'build':
-            y = content_y + 22
+            viewport = self._panel_viewport()
+            y = viewport.top + 8
             for key, d in DESIGNS.items():
                 btn = Button((x0, y, w, 22),
                              f"{d['display']}  [{d['build_time']} anos]",
@@ -462,6 +464,7 @@ class GameUI:
                 self._panel_buttons.append(_FakeLabel(
                     (x0 + 4, y, w, 12), cost_txt, self.f_small))
                 y += 14
+            self._panel_content_height = y - viewport.top
 
         elif self.active_tab == 'fleet':
             viewport = self._panel_viewport()
@@ -1110,7 +1113,7 @@ class GameUI:
                 px, py = self.world_to_screen(*p.abs_position)
                 pr = max(1, int(p.radius * self.zoom))
                 if -pr <= px <= self.W + pr and -pr <= py <= self.H + pr:
-                    if pr >= 8 or p.is_colonized and pr >= 4:
+                    if pr >= 6 or (p.is_colonized and pr >= 4):
                         image = self._map_planet_surface(p, pr * 2)
                         self.screen.blit(image, (px - pr, py - pr))
                     else:
@@ -1176,25 +1179,35 @@ class GameUI:
         for s in self.faction.ships.copy().values():
             if not s.alive:
                 continue
-            sx, sy = self.world_to_screen(*s.abs_position)
-            if not (0 <= sx < self.W and 0 <= sy < self.H):
-                continue
-            col = {'scout': (200, 200, 100), 'colony': (100, 220, 255),
-                   'transport': (200, 150, 80)}.get(s.design_key,
-                                                    (255, 100, 100))
-            pygame.draw.circle(self.screen, col, (sx, sy), 3)
-            if self.player.selected_ship is s:
-                pygame.draw.circle(self.screen, C.SELECTED, (sx, sy), 6, 1)
+            self._draw_ship_sprite(s, s is self.player.selected_ship)
         for f in self.state.factions:
             if f is self.faction or f.eliminated:
                 continue
             for s in list(f.ships.values()):
                 if not s.alive:
                     continue
-                sx, sy = self.world_to_screen(*s.abs_position)
-                if 0 <= sx < self.W and 0 <= sy < self.H:
-                    pygame.draw.circle(self.screen, (200, 60, 60),
-                                       (sx, sy), 2)
+                self._draw_ship_sprite(s, False)
+
+    def _draw_ship_sprite(self, ship, selected):
+        sx, sy = self.world_to_screen(*ship.abs_position)
+        if not (0 <= sx < self.W and 0 <= sy < self.H):
+            return
+        design = DESIGNS.get(ship.design_key)
+        if design is None or 'sprite' not in design:
+            raise ValueError(
+                f"Ship design '{ship.design_key}' has no sprite mapping")
+        base_size = 18 if ship.design_key in ('scout', 'transport') else 22
+        size = min(36, max(
+            14, round(base_size * min(
+                1.6, max(0.8, math.pow(self.zoom, 0.25))))))
+        sprite = get_ship_sprite(
+            design['sprite'], self._hex_to_rgb(ship.faction.color),
+            (size, size),
+        )
+        self.screen.blit(sprite, sprite.get_rect(center=(sx, sy)))
+        if selected:
+            pygame.draw.circle(
+                self.screen, C.SELECTED, (sx, sy), size // 2 + 3, 1)
 
     def _draw_topbar(self):
         pygame.draw.rect(self.screen, C.PANEL_BG, (0, 0, self.W, self.TOP_H))
@@ -1465,7 +1478,7 @@ class GameUI:
         capacity = planet.capacity_info()
         lights = round(city_light_intensity(
             planet.developement, planet.population,
-            capacity['max_dev'], capacity['max_pop'],), 1)
+            capacity['max_dev'], capacity['max_pop'],), 2)
         key = (id(planet), suitability, size, lights, self.texture_detail)
         if key not in self._planet_surfaces:
             star_name = (planet.parent_star.name
@@ -1481,7 +1494,7 @@ class GameUI:
         capacity = planet.capacity_info()
         lights = round(city_light_intensity(
             planet.developement, planet.population,
-            capacity['max_dev'], capacity['max_pop'],), 1)
+            capacity['max_dev'], capacity['max_pop'],), 2)
         key = (id(planet), suitability, size, lights, self.texture_detail)
         if key not in self._map_planet_surfaces:
             render_size = min(512, max(64, 1 << (size - 1).bit_length()))

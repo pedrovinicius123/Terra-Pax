@@ -64,7 +64,9 @@ class AIController(BaseController):
         desired = int(1 + self.aggression * 4
                       + f.tech_tree['weapons'] + (3 if at_war else 0))
         if len(warships) < desired:
-            for key in ('cruiser', 'destroyer', 'corvette'):
+            for key in (
+                    'dreadnought', 'battleship', 'cruiser', 'destroyer',
+                    'frigate', 'corvette'):
                 if f.can_afford(DESIGNS[key]['cost']):
                     f.build_ship(key)
                     break

@@ -35,10 +35,11 @@ class DiplomacyStatus(Enum):
 DESIGNS = {
     'scout': {
         'class': Scout, 'display': 'Scout',
-        'description': 'Explorador rapido', 'build_time': 3,
+        'description': 'Nave civil de exploração', 'build_time': 3,
         'cost': {'Minerals': 10, 'Food': 2, 'Electronics': 5, 'Chemicals': 10},
         'stats': {'speed': 8, 'hull': 20, 'shields': 0, 'weapons': 0,
                   'cargo': 0, 'scan_time': 1.0},
+        'sprite': 'spaceShips_008.png',
     },
     'colony': {
         'class': ColonyShip, 'display': 'Colonizadora',
@@ -47,6 +48,7 @@ DESIGNS = {
                  'Chemicals': 50},
         'stats': {'speed': 3, 'hull': 60, 'shields': 10, 'weapons': 0,
                   'cargo': 100},
+        'sprite': 'spaceShips_009.png',
     },
     'transport': {
         'class': Transport, 'display': 'Transporte',
@@ -54,6 +56,7 @@ DESIGNS = {
         'cost': {'Minerals': 50, 'Food': 20, 'Electronics': 20},
         'stats': {'speed': 5, 'hull': 40, 'shields': 5, 'weapons': 0,
                   'cargo': 500, 'resource': 'Minerals'},
+        'sprite': 'spaceShips_002.png',
     },
     'corvette': {
         'class': Warship, 'display': 'Corveta',
@@ -62,6 +65,16 @@ DESIGNS = {
                  'Chemicals': 20},
         'stats': {'speed': 6, 'hull': 100, 'shields': 20, 'weapons': 15,
                   'cargo': 20},
+        'sprite': 'spaceShips_001.png',
+    },
+    'frigate': {
+        'class': Warship, 'display': 'Fragata',
+        'description': 'Escolta rápida de frota', 'build_time': 6,
+        'cost': {'Minerals': 120, 'Alloys': 35, 'Electronics': 45,
+                 'Chemicals': 30},
+        'stats': {'speed': 6, 'hull': 145, 'shields': 35, 'weapons': 22,
+                  'cargo': 24},
+        'sprite': 'spaceShips_003.png',
     },
     'destroyer': {
         'class': Warship, 'display': 'Destroier',
@@ -70,6 +83,7 @@ DESIGNS = {
                  'Chemicals': 40},
         'stats': {'speed': 5, 'hull': 200, 'shields': 50, 'weapons': 30,
                   'cargo': 30},
+        'sprite': 'spaceShips_004.png',
     },
     'cruiser': {
         'class': Warship, 'display': 'Cruzador',
@@ -78,6 +92,25 @@ DESIGNS = {
                  'Chemicals': 100},
         'stats': {'speed': 4, 'hull': 400, 'shields': 100, 'weapons': 60,
                   'cargo': 50},
+        'sprite': 'spaceShips_005.png',
+    },
+    'battleship': {
+        'class': Warship, 'display': 'Encouraçado',
+        'description': 'Nave de linha fortemente armada', 'build_time': 22,
+        'cost': {'Minerals': 480, 'Alloys': 190, 'Electronics': 210,
+                 'Chemicals': 150},
+        'stats': {'speed': 3.5, 'hull': 620, 'shields': 170, 'weapons': 90,
+                  'cargo': 65},
+        'sprite': 'spaceShips_006.png',
+    },
+    'dreadnought': {
+        'class': Warship, 'display': 'Cruzador de batalha',
+        'description': 'Nave capital de assalto', 'build_time': 32,
+        'cost': {'Minerals': 700, 'Alloys': 300, 'Electronics': 300,
+                 'Chemicals': 240},
+        'stats': {'speed': 3, 'hull': 900, 'shields': 260, 'weapons': 130,
+                  'cargo': 80},
+        'sprite': 'spaceShips_007.png',
     },
 }
 
@@ -420,7 +453,7 @@ class Faction:
                 'ftl': 140}
         level = self.tech_tree.get(tech_field, 1)
         # Curva geométrica: 100, 170, 289, 491, ... 11859 (Lv10)
-        return base.get(tech_field, 100) * (1.7 ** (level - 1))
+        return base.get(tech_field, 100) * math.pow(1.7, level - 1)
 
     def is_tech_capped(self, field):
         return self.tech_tree.get(field, 1) >= TECH_CAPS.get(field, 10)
