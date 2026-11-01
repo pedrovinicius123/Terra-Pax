@@ -59,11 +59,6 @@ class AIController(BaseController):
 
     def _manage_fleet(self, state):
         f = self.faction
-        if len(f.colonies) >= 2:
-            has_transport = any(s.design_key == 'transport'
-                                for s in f.ships.values())
-            if not has_transport and f.can_afford(DESIGNS['transport']['cost']):
-                f.build_ship('transport')
         warships = [s for s in f.ships.values() if isinstance(s, Warship)]
         at_war = bool(f.war_declarations)
         desired = int(1 + self.aggression * 4
@@ -84,15 +79,32 @@ class AIController(BaseController):
             if other is f or other.eliminated:
                 continue
             status = f.diplomacy.get(other.name, DiplomacyStatus.NEUTRAL)
-            if status in (DiplomacyStatus.WAR, DiplomacyStatus.ALLY):
-                continue  # não mexe em guerra nem aliança existente
-
             their_power = other.compute_strength()['total']
+            relation = f.get_relation(other)
 
-            # Buscar aliança se em guerra e o outro é mais forte
-            if at_war and their_power > my_power * 1.1:
-                f.propose_alliance(other)
+            if status == DiplomacyStatus.WAR:
+                if relation < 35 and their_power > my_power * 1.1:
+                    relation = f.adjust_relation(other, 1)
+                if relation >= 35 and their_power > my_power * 1.1:
+                    f.update_diplomacy(other, DiplomacyStatus.PEACE)
                 continue
+
+            if status == DiplomacyStatus.ALLY:
+                continue
+
+            # Buscar apoio diplomático contra adversários mais fortes.
+            if at_war and their_power > my_power * 1.1:
+                if f.propose_alliance(other):
+                    continue
+
+            if self.aggression < 0.7 and relation < 70:
+                relation = f.adjust_relation(other, 1)
+            if relation >= 45:
+                f.offer_treaty(other, 'non_aggression')
+            if relation >= 55:
+                f.offer_treaty(other, 'trade')
+            if relation >= 70 and f.has_treaty(other, 'trade'):
+                f.propose_alliance(other)
 
             # Declarar guerra com vantagem esmagadora
             ratio = (my_power + 1) / (their_power + 1)

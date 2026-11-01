@@ -5,9 +5,12 @@ import pygame
 from players.factions import DESIGNS, DiplomacyStatus
 from players.ships import ColonyShip, Scout, Transport, Warship
 from graphics.planet_generator import (
+    city_light_intensity,
     dominant_suitability,
+    generate_city_networks,
     generate_planet_surface,
 )
+from logistics.game_3d import PlanetViewer3D
 
 
 class C:
@@ -85,6 +88,60 @@ class _FakeLabel:
                     self.rect.topleft)
 
 
+class _NumericSlider:
+    def __init__(self, rect, label, minimum, maximum, value, on_change):
+        self.rect = pygame.Rect(rect)
+        self.label = label
+        self.minimum = minimum
+        self.maximum = maximum
+        self.value = value
+        self.on_change = on_change
+        self.dragging = False
+
+    def _set_from_x(self, x):
+        ratio = (x - self.rect.left) / max(1, self.rect.width)
+        value = round(self.minimum + ratio * (self.maximum - self.minimum))
+        value = max(self.minimum, min(self.maximum, value))
+        if value != self.value:
+            self.value = value
+            self.on_change(value)
+
+    def handle_event(self, event):
+        if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+                and self.rect.collidepoint(event.pos)):
+            self.dragging = True
+            self._set_from_x(event.pos[0])
+            return True
+        if event.type == pygame.MOUSEMOTION and self.dragging:
+            self._set_from_x(event.pos[0])
+            return True
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            was_dragging = self.dragging
+            self.dragging = False
+            return was_dragging
+        return False
+
+    def draw(self, screen, font):
+        label = font.render(
+            f"{self.label}: {self.value}", True, C.TEXT)
+        screen.blit(label, (self.rect.x, self.rect.y - 20))
+        center_y = self.rect.centery
+        start_x = self.rect.left + 10
+        end_x = self.rect.right - 10
+        pygame.draw.line(screen, C.PANEL_BR, (start_x, center_y),
+                         (end_x, center_y), 4)
+        for value in range(self.minimum, self.maximum + 1):
+            ratio = ((value - self.minimum)
+                     / (self.maximum - self.minimum))
+            x = round(start_x + ratio * (end_x - start_x))
+            color = C.ACCENT if value <= self.value else C.DIM
+            pygame.draw.circle(screen, color, (x, center_y), 7)
+            pygame.draw.circle(screen, C.PANEL_BG, (x, center_y), 3)
+            numeral = font.render(str(value), True, C.DIM)
+            screen.blit(numeral, numeral.get_rect(
+                center=(x, self.rect.bottom + 10)))
+
+
 class GameUI:
     PANEL_W = 420
     TOP_H   = 36
@@ -112,15 +169,17 @@ class GameUI:
         self.filter_mode = 'all'
 
         self.tabs = ['resources', 'system', 'research', 'fleet',
-                     'colonies', 'build', 'war']
+                     'colonies', 'build', 'war', 'visual']
         self.tab_labels = {
             'resources': 'Recursos', 'system': 'Sistema',
             'research': 'Pesquisa', 'fleet': 'Frota',
             'colonies': 'Colônias',
-            'build': 'Construir', 'war': 'Guerra',
+            'build': 'Construir', 'war': 'Diplom.',
+            'visual': 'Visual',
         }
         self.active_tab = 'resources'
-        self._scrollable_tabs = {'fleet', 'colonies'}
+        self.texture_detail = 3
+        self._scrollable_tabs = {'fleet', 'colonies', 'war'}
         self._panel_scroll = {tab: 0 for tab in self._scrollable_tabs}
         self._panel_content_height = 0
 
@@ -133,11 +192,13 @@ class GameUI:
         self.log = []
         self._planet_surfaces = {}
         self._map_planet_surfaces = {}
+        self.planet_viewer = None
         self._last_event_idx = 0
         self._top_buttons = []
         self._filter_buttons = []
         self._tab_buttons = []
         self._panel_buttons = []
+        self._texture_slider = None
         self._action_buttons = []
 
         self._build_top_buttons()
@@ -248,6 +309,15 @@ class GameUI:
         self.active_tab = tab
         self._rebuild_panel_buttons()
 
+    def _set_texture_detail(self, value):
+        if value == self.texture_detail:
+            return
+        self.texture_detail = value
+        self._planet_surfaces.clear()
+        self._map_planet_surfaces.clear()
+        if self.planet_viewer is not None:
+            self.planet_viewer.set_detail_level(value)
+
     def _set_research(self, tech):
         if self.player.set_research(tech):
             self.log_msg(f"Foco de pesquisa: {tech}")
@@ -312,12 +382,29 @@ class GameUI:
             self.log_msg(f"Aliança: {other.name}")
             self._rebuild_panel_buttons()
         else:
-            self.log_msg("Aliança recusada")
+            self.log_msg(
+                "Aliança exige comércio ativo e relação ≥ 70")
 
     def _break_alliance(self, other):
         if self.player.break_alliance(other):
             self.log_msg(f"Aliança rompida: {other.name}")
             self._rebuild_panel_buttons()
+
+    def _improve_relations(self, other):
+        if self.player.improve_relations(other):
+            self.log_msg(f"Relações com {other.name} melhoraram (+10)")
+        else:
+            self.log_msg("Ação indisponível: confira energia, relação ou guerra")
+        self._rebuild_panel_buttons()
+
+    def _offer_treaty(self, other, treaty, label):
+        if self.player.offer_treaty(other, treaty):
+            self.log_msg(f"{label} firmado com {other.name}")
+        else:
+            threshold = 45 if treaty == 'non_aggression' else 55
+            self.log_msg(
+                f"{label} recusado: relação mínima {threshold}")
+        self._rebuild_panel_buttons()
 
     # ---------- Painel ----------
     def _planet_action(self, p):
@@ -341,6 +428,7 @@ class GameUI:
 
     def _rebuild_panel_buttons(self):
         self._panel_buttons = []
+        self._texture_slider = None
         x0 = self.W - self.PANEL_W + 10
         content_y = self.TOP_H + 42
         w = self.PANEL_W - 20
@@ -507,7 +595,8 @@ class GameUI:
                 y += 22
 
         elif self.active_tab == 'war':
-            y = content_y + 22
+            viewport = self._panel_viewport()
+            y = viewport.top + 8
             bw = (w - 4) // 2
             ac_label = f"Auto-colonizar: {'ON' if f.auto_colonize else 'OFF'}"
             at_label = f"Auto-terraform: {'ON' if f.auto_terraform else 'OFF'}"
@@ -540,6 +629,7 @@ class GameUI:
                     y += 18
                     continue
                 status = f.diplomacy.get(other.name, DiplomacyStatus.NEUTRAL)
+                relation = f.get_relation(other)
                 their_total = other.compute_strength()['total']
                 ratio = (my_total + 1) / (their_total + 1)
                 if ratio >= 1.5:
@@ -555,31 +645,79 @@ class GameUI:
                     f"{other.name[:18]}  [{status.value}]",
                     self.f_small))
                 y += 16
-                # linha 2: força
+                treaties = []
+                if f.has_treaty(other, 'non_aggression'):
+                    treaties.append("Não agressão")
+                if f.has_treaty(other, 'trade'):
+                    treaties.append("Comércio")
+                treaty_text = ", ".join(treaties) or "sem tratados"
                 self._panel_buttons.append(_FakeLabel(
                     (x0 + 4, y, w - 4, 14),
-                    f"  Força {their_total:.0f}  ({ratio:.2f}x nossa)",
+                    f"Relação {relation:3d}/100 · {treaty_text}",
                     self.f_small, color=ratio_col))
                 y += 16
-                # linha 3: ações
+                self._panel_buttons.append(_FakeLabel(
+                    (x0 + 4, y, w - 4, 14),
+                    f"Força {their_total:.0f} ({ratio:.2f}x nossa)",
+                    self.f_small, color=ratio_col))
+                y += 16
                 if status == DiplomacyStatus.WAR:
                     self._panel_buttons.append(Button(
-                        (x0, y, 90, 20), "Paz",
+                        (x0, y, 72, 20), "Paz",
                         lambda o=other: self._make_peace(o)))
-                    y += 22
                 elif status == DiplomacyStatus.ALLY:
                     self._panel_buttons.append(Button(
-                        (x0, y, 130, 20), "Romper aliança",
+                        (x0, y, 140, 20), "Romper aliança",
                         lambda o=other: self._break_alliance(o)))
-                    y += 22
                 else:
-                    self._panel_buttons.append(Button(
-                        (x0, y, 80, 20), "Guerra",
-                        lambda o=other: self._declare_war(o)))
-                    self._panel_buttons.append(Button(
-                        (x0 + 86, y, 100, 20), "Aliança",
-                        lambda o=other: self._propose_alliance(o)))
+                    action_x = x0
+                    actions = (
+                        (120, "Relação +10/25E",
+                         lambda o=other: self._improve_relations(o),
+                         lambda o=other: (
+                             f.get_relation(o) < 100
+                             and f.resources.get('Energy', 0) >= 25)),
+                        (100, ("Pacto ativo" if
+                               f.has_treaty(other, 'non_aggression')
+                               else "Não agressão"),
+                         lambda o=other: self._offer_treaty(
+                             o, 'non_aggression', 'Pacto'),
+                         lambda o=other: (
+                             not f.has_treaty(o, 'non_aggression')
+                             and f.get_relation(o) >= 45)),
+                        (92, ("Comércio OK" if
+                              f.has_treaty(other, 'trade') else "Comércio"),
+                         lambda o=other: self._offer_treaty(
+                             o, 'trade', 'Acordo comercial'),
+                         lambda o=other: (
+                             not f.has_treaty(o, 'trade')
+                             and f.get_relation(o) >= 55)),
+                        (62, "Guerra",
+                         lambda o=other: self._declare_war(o), None),
+                    )
+                    for width, label, callback, enabled in actions:
+                        self._panel_buttons.append(Button(
+                            (action_x, y, width, 20), label, callback,
+                            enabled=(
+                                (lambda check=enabled: check())
+                                if enabled else None)))
+                        action_x += width + 4
                     y += 22
+                    self._panel_buttons.append(Button(
+                        (x0, y, 140, 20), "Propor aliança",
+                        lambda o=other: self._propose_alliance(o),
+                        enabled=lambda o=other: (
+                            f.get_relation(o) >= 70
+                            and f.has_treaty(o, 'trade'))))
+                y += 24
+            self._panel_content_height = y - viewport.top
+
+        elif self.active_tab == 'visual':
+            slider_rect = pygame.Rect(
+                x0 + 18, content_y + 58, w - 36, 34)
+            self._texture_slider = _NumericSlider(
+                slider_rect, "Detalhe da textura", 1, 8,
+                self.texture_detail, self._set_texture_detail)
         if self.active_tab in self._scrollable_tabs:
             viewport = self._panel_viewport()
             max_scroll = max(
@@ -616,6 +754,15 @@ class GameUI:
 
     # ---------- Eventos ----------
     def handle_event(self, event):
+        if self.planet_viewer is not None:
+            if self.planet_viewer.handle_event(event):
+                self.planet_viewer = None
+            return
+
+        if (self.active_tab == 'visual' and self._texture_slider is not None
+                and self._texture_slider.handle_event(event)):
+            return
+
         if event.type == pygame.MOUSEMOTION:
             all_btns = (self._top_buttons + self._filter_buttons
                         + self._tab_buttons + self._action_buttons)
@@ -700,6 +847,8 @@ class GameUI:
                 self.zoom = self.DEFAULT_ZOOM
                 self._center_map_on_galaxy()
                 self._map_planet_surfaces.clear()
+            elif event.key == pygame.K_v:
+                self._open_planet_viewer()
 
     def _zoom_at(self, pos, direction):
         if direction == 0:
@@ -765,6 +914,14 @@ class GameUI:
                     (x, y, 150, 24), "Max. terraform",
                     lambda: None, enabled=lambda: False))
                 x += 160
+        self._action_buttons.append(Button(
+            (x, y, 150, 24), "Vista 3D  [V]",
+            self._open_planet_viewer,
+        ))
+
+    def _open_planet_viewer(self):
+        if self.selected_planet is not None:
+            self.planet_viewer = PlanetViewer3D(self.texture_detail)
 
     # ---------- Render ----------
     def render(self):
@@ -776,6 +933,7 @@ class GameUI:
         self.screen.fill(C.BG)
         self._draw_grid()
         self._draw_influence_spheres()
+        self._draw_colony_routes()
         self._draw_stars_and_planets()
         self._draw_ships()
         self._draw_topbar()
@@ -792,6 +950,9 @@ class GameUI:
             self._tab_buttons[i].draw(self.screen, self.f_tab,
                                       active=(t == self.active_tab))
         self._draw_panel_buttons()
+        if self.planet_viewer is not None and self.selected_planet is not None:
+            self.planet_viewer.draw(
+                self.screen, self.selected_planet, self.f_title, self.f_small)
 
     def _draw_panel_buttons(self):
         if self.active_tab not in self._scrollable_tabs:
@@ -801,6 +962,8 @@ class GameUI:
                 else:
                     button.draw(self.screen, self.f,
                                 active=getattr(button, '_active', False))
+            if self._texture_slider is not None:
+                self._texture_slider.draw(self.screen, self.f_small)
             return
 
         viewport = self._panel_viewport()
@@ -948,12 +1111,14 @@ class GameUI:
                 px, py = self.world_to_screen(*p.abs_position)
                 pr = max(1, int(p.radius * self.zoom))
                 if -pr <= px <= self.W + pr and -pr <= py <= self.H + pr:
-                    if not p.is_colonized and pr >= 8:
+                    if pr >= 8:
                         image = self._map_planet_surface(p, pr * 2)
                         self.screen.blit(image, (px - pr, py - pr))
                     else:
                         pygame.draw.circle(
                             self.screen, self._planet_color(p), (px, py), pr)
+                    if p.is_colonized and 4 <= pr < 8:
+                        self._draw_city_lights_2d(p, px, py, pr)
                     if not p.is_colonized and pr >= 3:
                         pygame.draw.circle(
                             self.screen, self._planet_color(p), (px, py),
@@ -968,6 +1133,92 @@ class GameUI:
                     if p is self.selected_planet:
                         pygame.draw.circle(self.screen, C.SELECTED,
                                            (px, py), pr + 3, 1)
+
+    def _draw_colony_routes(self):
+        for faction in self.state.factions:
+            if faction.eliminated:
+                continue
+            colonized_systems = {
+                planet.parent_star.name for planet in faction.colonies.values()
+                if planet.parent_star is not None
+            }
+            if len(colonized_systems) < 2:
+                continue
+            color = self._hex_to_rgb(faction.color)
+            for first, second in self.state.map_G.edges:
+                if (first not in colonized_systems
+                        or second not in colonized_systems):
+                    continue
+                start = self.world_to_screen(
+                    *self.state.stars_by_name[first].position)
+                end = self.world_to_screen(
+                    *self.state.stars_by_name[second].position)
+                self._draw_dashed_line(start, end, color)
+
+    def _draw_dashed_line(self, start, end, color):
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length = math.hypot(dx, dy)
+        if length < 1:
+            return
+        dash_length, gap_length = 9, 6
+        offset = 0.0
+        while offset < length:
+            dash_end = min(length, offset + dash_length)
+            point_start = (
+                round(start[0] + dx * offset / length),
+                round(start[1] + dy * offset / length),
+            )
+            point_end = (
+                round(start[0] + dx * dash_end / length),
+                round(start[1] + dy * dash_end / length),
+            )
+            pygame.draw.line(self.screen, color, point_start, point_end, 1)
+            offset += dash_length + gap_length
+
+    def _draw_city_lights_2d(self, planet, x, y, radius):
+        capacity = planet.capacity_info()
+        intensity = city_light_intensity(
+            planet.developement, planet.population,
+            capacity['max_dev'], capacity['max_pop'],
+        )
+        if intensity <= 0.02:
+            return
+        seed = f"{planet.parent_star.name}:{planet.name}"
+        networks = generate_city_networks(seed)
+        active_cities = networks[:max(
+            1, round(len(networks) * intensity))]
+        lights = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        road_color = (255, 170, 83, round(55 + 90 * intensity))
+        block_color = (255, 215, 142, round(100 + 140 * intensity))
+        sun = (-0.45, 0.24, 0.86)
+        for center, blocks, roads, city_radius in active_cities:
+            for start, end in roads:
+                if (start[2] <= 0.0 or end[2] <= 0.0
+                        or sum(start[i] * sun[i] for i in range(3)) >= 0.0
+                        or sum(end[i] * sun[i] for i in range(3)) >= 0.0):
+                    continue
+                pygame.draw.aaline(
+                    lights, road_color,
+                    (round(x + start[0] * radius),
+                     round(y - start[1] * radius)),
+                    (round(x + end[0] * radius),
+                     round(y - end[1] * radius)),
+                )
+            for px, py, pz in blocks:
+                if (pz <= 0.0
+                        or px * sun[0] + py * sun[1] + pz * sun[2] >= 0.0):
+                    continue
+                pygame.draw.circle(
+                    lights, block_color,
+                    (round(x + px * radius), round(y - py * radius)), 1)
+            if (center[2] > 0.0
+                    and sum(center[i] * sun[i] for i in range(3)) < 0.0):
+                pygame.draw.circle(
+                    lights, (255, 167, 80, round(90 + 130 * intensity)),
+                    (round(x + center[0] * radius),
+                     round(y - center[1] * radius)),
+                    max(1, round(city_radius * radius * 0.18)))
+        self.screen.blit(lights, (0, 0))
 
     def _draw_ships(self):
         for s in self.faction.ships.copy().values():
@@ -1138,7 +1389,7 @@ class GameUI:
 
         
         elif self.active_tab == 'war':
-            self.screen.blit(self.f_med.render("GUERRA E EXPANSAO",
+            self.screen.blit(self.f_med.render("DIPLOMACIA",
                                                True, C.ACCENT),
                              (x0 + 10, y))
             y += 18
@@ -1149,7 +1400,17 @@ class GameUI:
                 y += 14
             self.screen.blit(self.f_small.render(
                 f"Guerras: {len(f.war_declarations)}   "
-                f"Aliados: {len(f.allies)}",
+                f"Aliados: {len(f.allies)}   "
+                f"Comércio: {sum('trade' in p for p in f.treaties.values())}",
+                True, C.DIM), (x0 + 10, y))
+
+        elif self.active_tab == 'visual':
+            self.screen.blit(self.f_med.render(
+                "DETALHE DAS TEXTURAS", True, C.ACCENT),
+                (x0 + 10, y))
+            y += 22
+            self.screen.blit(self.f_small.render(
+                "Escolha de 1 (leve) a 8 (mais detalhado).",
                 True, C.DIM), (x0 + 10, y))
 
     def _draw_bottombar(self):
@@ -1249,21 +1510,33 @@ class GameUI:
 
     def _planet_surface(self, planet, size):
         suitability = tuple(sorted(planet.life_suitability.items()))
-        key = (id(planet), suitability, size)
+        capacity = planet.capacity_info()
+        lights = round(city_light_intensity(
+            planet.developement, planet.population,
+            capacity['max_dev'], capacity['max_pop'],), 1)
+        key = (id(planet), suitability, size, lights, self.texture_detail)
         if key not in self._planet_surfaces:
             star_name = (planet.parent_star.name
                          if planet.parent_star is not None else '')
             seed = f"{star_name}:{planet.name}"
             self._planet_surfaces[key] = generate_planet_surface(
-                planet.life_suitability, seed, size)
+                planet.life_suitability, seed, size, city_lights=lights,
+                detail_level=self.texture_detail)
         return self._planet_surfaces[key]
 
     def _map_planet_surface(self, planet, size):
         suitability = tuple(sorted(planet.life_suitability.items()))
-        key = (id(planet), suitability, size)
+        capacity = planet.capacity_info()
+        lights = round(city_light_intensity(
+            planet.developement, planet.population,
+            capacity['max_dev'], capacity['max_pop'],), 1)
+        key = (id(planet), suitability, size, lights, self.texture_detail)
         if key not in self._map_planet_surfaces:
-            self._map_planet_surfaces[key] = pygame.transform.smoothscale(
-                self._planet_surface(planet, 64), (size, size))
+            render_size = min(512, max(64, 1 << (size - 1).bit_length()))
+            surface = self._planet_surface(planet, render_size)
+            self._map_planet_surfaces[key] = (
+                surface if surface.get_size() == (size, size)
+                else pygame.transform.smoothscale(surface, (size, size)))
         return self._map_planet_surfaces[key]
 
     def _draw_log(self):

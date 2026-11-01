@@ -45,27 +45,81 @@ Essa afinidade também orienta a escolha de planetas natais das facções. A
 textura ilustrada é criada localmente a partir do perfil e da identidade do
 planeta; ela aparece no mapa quando ampliado e no painel de detalhes ao
 selecionar um planeta. As pontuações continuam visíveis para comparar a
-adequação de cada mundo.
+adequação de cada mundo. As superfícies combinam continentes e costas com
+ruído em múltiplas escalas, variação de terreno, regiões polares e nuvens,
+mantendo a continuidade da textura ao redor do globo.
+
+A galáxia começa com dez facções controladas por IA ou pelo jogador, com
+representantes dos quatro tipos de suitability (**Human**, **Alien**,
+**Hybrid** e **Robot**).
+
+Antes de cada partida, escolha qualquer uma das facções para comandar. As
+demais recebem controladores de IA.
 
 Os sistemas estelares são distribuídos por uma galáxia de 4000 unidades, com
 espaçamento mínimo proporcional à escala da galáxia e inverso à raiz da
 quantidade de estrelas. O alcance colonial inicial é de 600 unidades e aumenta
-em 100 a cada nível de FTL acima do primeiro.
+em 100 a cada nível de FTL acima do primeiro. As estrelas, planetas e órbitas
+foram reduzidos para manter os astros pequenos em relação às distâncias entre
+sistemas.
+
+Colônias recebem redes urbanas no lado noturno dos planetas: centros
+metropolitanos, quadras iluminadas e vias conectadas, em vez de pontos
+dispersos. A quantidade e o brilho crescem conforme população e
+desenvolvimento, tanto no mapa quanto no visualizador 3D.
 
 ## Interface e controles
 
 - Clique em uma estrela ou planeta para selecionar e ver o sistema e os
   detalhes do mundo.
+- Selecione um planeta e pressione `V` (ou use **Vista 3D**) para abrir a esfera
+  3D gerada localmente; arraste para girar, use a roda para zoom e `Esc`/`V`
+  para fechar.
+- Linhas tracejadas coloridas conectam sistemas vizinhos colonizados pela mesma
+  facção.
 - Use a roda do mouse para ampliar/reduzir o mapa (zoom inicial 0,45 e máximo
   120x) e arraste para navegar. `R` recentraliza a galáxia e restaura o zoom.
 - As abas **Frota** e **Colônias** organizam naves por função e mundos entre
   capital e colônias; role a roda sobre a lista para navegar e selecione uma
   linha para focar a nave ou o mundo no mapa.
+- Em **Visual**, ajuste o detalhe das texturas de 1 a 8; os níveis maiores
+  aumentam a resolução das texturas e a malha do visualizador 3D.
+- Em **Diplom.**, melhore relações por 25 de Energia (+10, até 100), proponha
+  pactos de não agressão (relação 45) e acordos comerciais (relação 55), ou
+  declare guerra. Alianças exigem acordo comercial e relação 70; acordos
+  comerciais aumentam a pesquisa em 5% por parceiro, até 50%. A IA também
+  negocia e pode encerrar guerras quando as relações permitem.
 - `Espaço` pausa ou retoma a simulação; `F11` alterna tela cheia.
 - Os botões no topo controlam pausa e velocidade. Os filtros do mapa alternam
   entre todos os planetas, os da sua facção e os ainda livres.
 - As abas laterais reúnem recursos, sistemas, pesquisa, frota, construção e
   diplomacia.
+
+## Logística
+
+A pasta `logistics/` contém a política de logística automática e o visualizador
+3D integrado à interface principal. Cada facção encomenda transportadores
+civis conforme cresce o número de colônias (até quatro naves). Os transportes
+procuram colônias com excedente e espaço de armazenamento, carregam minerais e
+fazem as entregas por rotas do mapa; cargas não entregues são mantidas a bordo
+até que uma colônia tenha capacidade.
+
+O visualizador 3D é renderizado em software pelo Pygame, usa as mesmas
+categorias e sementes procedurais dos planetas 2D e não baixa imagens nem
+depende de OpenGL. Os adaptadores de colônia (`logistics_node.pyx`) e o
+planejador de transferências (`logistics_manager.pyx`) são extensões Cython
+usadas pelo gerenciador logístico quando compiladas. O jogo mantém versões
+Python equivalentes como fallback. Para ativar as extensões no ambiente virtual
+da raiz (com um compilador C/C++ instalado), execute:
+
+```bash
+venv/bin/python -m pip install -r requirements.txt
+venv/bin/python setup.py build_ext --inplace
+```
+
+No visualizador, clique e arraste sobre o planeta para girá-lo; use a roda
+para aproximar ou afastar. As luzes de cidades aparecem na face noturna e
+acompanham a rotação da superfície.
 
 ## Tecnologias
 

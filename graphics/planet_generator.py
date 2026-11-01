@@ -1,6 +1,9 @@
+import math
 import random
 from collections.abc import Mapping
+from functools import lru_cache
 
+import numpy as np
 import pygame
 
 
@@ -32,6 +35,16 @@ def dominant_suitability(suitability: Mapping[str, float]) -> str:
     )
 
 
+def city_light_intensity(
+        development: float, population: float,
+        max_development: float, max_population: float) -> float:
+    development_ratio = min(
+        1.0, max(0.0, development / max(1.0, max_development)))
+    population_ratio = min(
+        1.0, max(0.0, population / max(1.0, max_population)))
+    return (development_ratio * population_ratio) ** 0.5
+
+
 def _stable_seed(value: str) -> int:
     seed = 2166136261
     for character in value:
@@ -39,51 +52,227 @@ def _stable_seed(value: str) -> int:
     return seed
 
 
+@lru_cache(maxsize=256)
+def generate_city_networks(seed: str, count: int = 36):
+    """Create deterministic city clusters with roads and dense block lights."""
+    generator = random.Random(_stable_seed(f"{seed}:cities"))
+    networks = []
+    grid = (-0.72, -0.36, 0.0, 0.36, 0.72)
+    phase = generator.uniform(0.0, math.tau)
+    golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+
+    for index in range(count):
+        y = 1.0 - 2.0 * (index + 0.5) / count
+        latitude = math.asin(y) + generator.uniform(-0.015, 0.015)
+        longitude = (
+            index * golden_angle + phase
+            + generator.uniform(-0.015, 0.015)
+        ) % math.tau
+        center = (
+            math.cos(latitude) * math.sin(longitude),
+            math.sin(latitude),
+            math.cos(latitude) * math.cos(longitude),
+        )
+        east = (math.cos(longitude), 0.0, -math.sin(longitude))
+        north = (
+            -math.sin(latitude) * math.sin(longitude),
+            math.cos(latitude),
+            -math.sin(latitude) * math.cos(longitude),
+        )
+        city_radius = generator.uniform(0.045, 0.11)
+
+        def surface_point(east_offset, north_offset):
+            point = tuple(
+                center[axis]
+                + east[axis] * east_offset
+                + north[axis] * north_offset
+                for axis in range(3)
+            )
+            length = math.sqrt(sum(component ** 2 for component in point))
+            return tuple(component / length for component in point)
+
+        grid_points = []
+        blocks = []
+        roads = []
+        for north_index, north_offset in enumerate(grid):
+            row = []
+            for east_index, east_offset in enumerate(grid):
+                if east_offset ** 2 + north_offset ** 2 > 0.92:
+                    row.append(None)
+                    continue
+                jitter = city_radius * 0.035
+                point = surface_point(
+                    city_radius * (east_offset + generator.uniform(
+                        -jitter, jitter)),
+                    city_radius * (north_offset + generator.uniform(
+                        -jitter, jitter)),
+                )
+                row.append(point)
+                blocks.append(point)
+                if east_index > 0 and row[-2] is not None:
+                    roads.append((row[-2], point))
+                if north_index > 0 and grid_points[north_index - 1][
+                        east_index] is not None:
+                    roads.append((
+                        grid_points[north_index - 1][east_index], point))
+            grid_points.append(row)
+
+        for spoke in range(8):
+            angle = math.tau * spoke / 8
+            edge = surface_point(
+                city_radius * 0.98 * math.cos(angle),
+                city_radius * 0.98 * math.sin(angle),
+            )
+            roads.append((center, edge))
+            blocks.append(edge)
+
+        networks.append((center, blocks, roads, city_radius))
+    generator.shuffle(networks)
+    return networks
+
+
+def _periodic_value_noise(
+        width: int, height: int, grid_width: int, grid_height: int,
+        generator: random.Random) -> np.ndarray:
+    lattice = np.asarray([
+        [generator.random() for _ in range(grid_width)]
+        for _ in range(grid_height + 1)
+    ], dtype=np.float32)
+    x = (np.arange(width, dtype=np.float32) + 0.5) * grid_width / width
+    y = (np.arange(height, dtype=np.float32) + 0.5) * grid_height / height
+    x_floor = np.floor(x).astype(np.int32)
+    y_floor = np.floor(y).astype(np.int32)
+    x_fraction = x - x_floor
+    y_fraction = y - y_floor
+    x_blend = x_fraction * x_fraction * (3.0 - 2.0 * x_fraction)
+    y_blend = y_fraction * y_fraction * (3.0 - 2.0 * y_fraction)
+
+    x0 = x_floor % grid_width
+    x1 = (x0 + 1) % grid_width
+    y0 = np.minimum(y_floor, grid_height - 1)
+    y1 = y0 + 1
+    north = (
+        lattice[y0[:, None], x0[None, :]]
+        * (1.0 - x_blend[None, :])
+        + lattice[y0[:, None], x1[None, :]] * x_blend[None, :]
+    )
+    south = (
+        lattice[y1[:, None], x0[None, :]]
+        * (1.0 - x_blend[None, :])
+        + lattice[y1[:, None], x1[None, :]] * x_blend[None, :]
+    )
+    return (
+        north * (1.0 - y_blend[:, None])
+        + south * y_blend[:, None]
+    )
+
+
+def _surface_array(texture: pygame.Surface) -> np.ndarray:
+    return np.transpose(pygame.surfarray.array3d(texture), (1, 0, 2))
+
+
 def generate_planet_surface(
         suitability: Mapping[str, float], seed: str,
-        size: int = 96) -> pygame.Surface:
+        size: int = 96, city_lights: float = 0.0,
+        detail_level: int = 3) -> pygame.Surface:
     """Render a repeatable, randomly textured 2D planet for a world."""
     if size < 16:
         raise ValueError("Planet surfaces must be at least 16 pixels wide")
+    if not isinstance(detail_level, int) or not 1 <= detail_level <= 8:
+        raise ValueError("Texture detail must be an integer from 1 to 8")
 
-    base_color, land_color, highlight_color = SUITABILITY_STYLES[
-        dominant_suitability(suitability)
-    ]
-    generator = random.Random(_stable_seed(seed))
+    texture = generate_planet_texture(
+        suitability, seed, (size * 2, size), detail_level=detail_level)
+    texture_pixels = _surface_array(texture)
     center = size // 2
     radius = int(size * 0.43)
 
     sphere = pygame.Surface((size, size), pygame.SRCALPHA)
-    pygame.draw.circle(sphere, base_color, (center, center), radius)
-
-    terrain = pygame.Surface((size, size), pygame.SRCALPHA)
-    for _ in range(generator.randint(4, 8)):
-        x = center + generator.randint(-radius // 2, radius // 2)
-        y = center + generator.randint(-radius // 2, radius // 2)
-        width = generator.randint(max(4, radius // 3), max(5, radius))
-        height = generator.randint(max(3, radius // 5),
-                                   max(4, radius // 2))
-        color = generator.choice((land_color, highlight_color))
-        pygame.draw.ellipse(
-            terrain, color,
-            (x - width // 2, y - height // 2, width, height),
-        )
-
-    sphere_mask = pygame.mask.from_surface(sphere)
-    clip = sphere_mask.to_surface(
-        setcolor=(255, 255, 255, 255), unsetcolor=(0, 0, 0, 0))
-    terrain.blit(clip, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-    sphere.blit(terrain)
-
-    shade = pygame.Surface((size, size), pygame.SRCALPHA)
-    pygame.draw.ellipse(
-        shade, (5, 12, 27, 105),
-        (center - radius // 3, center - radius,
-         radius * 2, radius * 2),
+    x_grid, y_grid = np.meshgrid(np.arange(size), np.arange(size))
+    nx = (x_grid - center) / radius
+    ny = (center - y_grid) / radius
+    nz_squared = 1.0 - nx ** 2 - ny ** 2
+    mask = nz_squared >= 0.0
+    nz = np.sqrt(np.maximum(0.0, nz_squared))
+    longitude = np.arctan2(nx, nz)
+    latitude = np.arcsin(np.clip(ny, -1.0, 1.0))
+    tex_x = np.mod(
+        ((longitude / math.tau + 0.5) * texture.get_width()).astype(int),
+        texture.get_width(),
     )
-    shade.blit(clip, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-    sphere.blit(shade)
+    tex_y = np.clip(
+        ((0.5 - latitude / math.pi) * texture.get_height()).astype(int),
+        0, texture.get_height() - 1,
+    )
+    sun = np.asarray((-0.45, 0.24, 0.86), dtype=np.float32)
+    sun /= np.linalg.norm(sun)
+    illumination = (
+        nx * sun[0] + ny * sun[1] + nz * sun[2])
+    brightness = 0.20 + 0.80 * np.maximum(0.0, illumination)
+    pixels = texture_pixels[tex_y, tex_x]
+    shaded = np.clip(
+        pixels * brightness[..., None], 0, 255).astype(np.uint8)
+    pixels3d = pygame.surfarray.pixels3d(sphere)
+    pixels3d[:, :, :] = np.transpose(shaded, (1, 0, 2))
+    del pixels3d
+    pixels_alpha = pygame.surfarray.pixels_alpha(sphere)
+    pixels_alpha[:, :] = np.transpose(mask.astype(np.uint8) * 255, (1, 0))
+    del pixels_alpha
 
+    if city_lights > 0:
+        light_layer = pygame.Surface((size, size), pygame.SRCALPHA)
+        networks = generate_city_networks(seed)
+        active_cities = networks[:max(
+            1, round(len(networks) * min(1.0, city_lights)))]
+        road_color = (255, 166, 75, round(45 + 65 * city_lights))
+        block_color = (255, 197, 112, round(100 + 120 * city_lights))
+        for city_center, blocks, roads, city_radius in active_cities:
+            for start, end in roads:
+                if any(
+                        point[2] <= 0.0
+                        or sum(point[i] * sun[i] for i in range(3)) >= 0.0
+                        for point in (start, end)):
+                    continue
+                pygame.draw.aaline(
+                    light_layer,
+                    road_color,
+                    (round(center + start[0] * radius),
+                     round(center - start[1] * radius)),
+                    (round(center + end[0] * radius),
+                     round(center - end[1] * radius)),
+                )
+
+            city_point = (
+                round(center + city_center[0] * radius),
+                round(center - city_center[1] * radius),
+            )
+            if (city_center[2] > 0.0
+                    and sum(city_center[i] * sun[i] for i in range(3)) < 0.0):
+                glow_radius = max(2, round(city_radius * radius * 0.28))
+                pygame.draw.circle(
+                    light_layer, (255, 145, 55, round(20 + 35 * city_lights)),
+                    city_point, glow_radius)
+            for px, py, pz in blocks:
+                if (pz <= 0.0
+                        or px * sun[0] + py * sun[1] + pz * sun[2] >= 0.0):
+                    continue
+                pygame.draw.circle(
+                    light_layer, block_color,
+                    (round(center + px * radius),
+                     round(center - py * radius)),
+                    max(1, size // 160),
+                )
+        sphere.blit(light_layer)
+        outside_sphere = ~np.transpose(mask, (1, 0))
+        pixels3d = pygame.surfarray.pixels3d(sphere)
+        pixels3d[outside_sphere] = 0
+        del pixels3d
+        pixels_alpha = pygame.surfarray.pixels_alpha(sphere)
+        pixels_alpha[:, :] = np.transpose(mask.astype(np.uint8) * 255, (1, 0))
+        del pixels_alpha
+
+    _, _, highlight_color = SUITABILITY_STYLES[
+        dominant_suitability(suitability)]
     pygame.draw.arc(
         sphere, highlight_color,
         (center - radius + 2, center - radius + 2,
@@ -92,3 +281,83 @@ def generate_planet_surface(
     )
     pygame.draw.circle(sphere, (196, 227, 255), (center, center), radius, 1)
     return sphere
+
+
+def generate_planet_texture(
+        suitability: Mapping[str, float], seed: str,
+        size: tuple[int, int] = (256, 128),
+        detail_level: int = 3) -> pygame.Surface:
+    """Create a repeatable equirectangular surface for 3D planet rendering."""
+    width, height = size
+    if width < 32 or height < 16:
+        raise ValueError("Planet textures must be at least 32x16 pixels")
+    if not isinstance(detail_level, int) or not 1 <= detail_level <= 8:
+        raise ValueError("Texture detail must be an integer from 1 to 8")
+    pixel_scale = 0.5 + detail_level * 0.5
+    width = round(width * pixel_scale)
+    height = round(height * pixel_scale)
+
+    suitability_type = dominant_suitability(suitability)
+    base_color, land_color, highlight_color = SUITABILITY_STYLES[
+        suitability_type]
+    generator = random.Random(_stable_seed(seed))
+    continents = (
+        0.58 * _periodic_value_noise(width, height, 6, 3, generator)
+        + 0.29 * _periodic_value_noise(width, height, 12, 6, generator)
+        + 0.13 * _periodic_value_noise(width, height, 24, 12, generator)
+    )
+    terrain_layers = [
+        _periodic_value_noise(
+            width, height,
+            min(width // 2, 16 * 2 ** octave),
+            min(height // 2, 8 * 2 ** octave),
+            generator)
+        for octave in range(detail_level)
+    ]
+    terrain_weights = np.asarray(
+        [0.5 ** octave for octave in range(detail_level)],
+        dtype=np.float32)
+    terrain_weights /= terrain_weights.sum()
+    terrain_variation = sum(
+        layer * weight
+        for layer, weight in zip(terrain_layers, terrain_weights))
+    clouds = (
+        0.65 * _periodic_value_noise(width, height, 10, 5, generator)
+        + 0.35 * _periodic_value_noise(width, height, 20, 10, generator)
+    )
+
+    latitude = np.linspace(-math.pi / 2, math.pi / 2, height)
+    latitude = np.broadcast_to(latitude[:, None], (height, width))
+    land_mask = np.clip((continents - 0.455) / 0.105, 0.0, 1.0)
+    terrain_variation = np.clip(terrain_variation, 0.0, 1.0)
+    ocean_depth = np.clip((0.52 - continents) * 2.8, 0.0, 1.0)
+
+    ocean = np.asarray(base_color, dtype=np.float32) * (
+        0.58 + 0.48 * (1.0 - ocean_depth[..., None]))
+    shallow = np.asarray(land_color, dtype=np.float32) * 0.54
+    ocean = ocean * (1.0 - land_mask[..., None] * 0.56) + (
+        shallow * land_mask[..., None] * 0.56)
+    land_dark = np.asarray(land_color, dtype=np.float32) * 0.72
+    land_bright = np.asarray(highlight_color, dtype=np.float32) * 0.86
+    land = land_dark * (1.0 - terrain_variation[..., None]) + (
+        land_bright * terrain_variation[..., None])
+    color = ocean * (1.0 - land_mask[..., None]) + (
+        land * land_mask[..., None])
+
+    polar_ice = np.clip(
+        (np.abs(latitude) - 0.96
+         + (terrain_layers[-1] - 0.5) * 0.11) / 0.08,
+        0.0, 1.0,
+    )
+    ice_color = np.asarray((194, 222, 231), dtype=np.float32)
+    color = color * (1.0 - polar_ice[..., None]) + (
+        ice_color * polar_ice[..., None])
+
+    cloud_mask = np.clip((clouds - 0.59) * 2.6, 0.0, 0.42)
+    cloud_color = np.asarray((211, 226, 232), dtype=np.float32)
+    color = color * (1.0 - cloud_mask[..., None]) + (
+        cloud_color * cloud_mask[..., None])
+
+    rgb = np.clip(color, 0, 255).astype(np.uint8)
+    return pygame.surfarray.make_surface(
+        np.transpose(rgb, (1, 0, 2)))

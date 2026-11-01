@@ -63,9 +63,9 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
                 f"after {attempt + 1} attempts"
             )
 
-        # Realista: estrela ~10x o raio de um planeta; sistema compacto.
-        star_r = random.uniform(0.007, 0.011) *sector_size  # 10.5–16.5 u
-        planet_r = random.uniform(0.0015, 0.0030) *sector_size # 2.25–4.5 u
+        # Astro sizes stay small compared with inter-system distances.
+        star_r = random.uniform(0.003, 0.005) * sector_size
+        planet_r = random.uniform(0.0007, 0.0012) * sector_size
 
         star = Star(
             name=generate_traditional_star_name(),
@@ -80,7 +80,7 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
         # Órbitas compactas, em camadas: base + k * passo
         n_planets = random.randint(1, 8)
         base_orbit = star_r * 1.5
-        orbit_step = star_r * 0.40
+        orbit_step = star_r * 0.35
 
         for k in range(n_planets):
             dist = base_orbit + k * orbit_step

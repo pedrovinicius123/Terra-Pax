@@ -5,6 +5,7 @@ from queue import Empty
 from enum import Enum
 from graphics.star import SIMULATION_STEP_YEARS
 from players.ships import Scout, ColonyShip, Transport, Warship
+from logistics.modules.logistics_manager import LogisticsManager
 
 RESEARCH_SCALE = 15.0
 BASE_COLONIZATION_RANGE = 600.0
@@ -130,6 +131,7 @@ class Faction:
 
         self.ships = {}
         self._ship_counter = 0
+        self.logistics_manager = LogisticsManager(self)
         
         self.stations = {}
         self.scout_manager = None
@@ -144,6 +146,8 @@ class Faction:
         self.colonization_rng = BASE_COLONIZATION_RANGE
 
         self.diplomacy = {}
+        self.relations = {}
+        self.treaties = {}
         self.war_declarations = set()
         self.allies = set()
 
@@ -405,6 +409,9 @@ class Faction:
                        for p in self.colonies.values()
                        if p.is_colonized and p.faction is self)
         per_tick *= RESEARCH_SCALE
+        trade_partners = sum(
+            'trade' in treaties for treaties in self.treaties.values())
+        per_tick *= 1.0 + min(0.5, trade_partners * 0.05)
         return per_tick / SIMULATION_STEP_YEARS
     
     def get_research_cost(self, tech_field):
@@ -526,7 +533,50 @@ class Faction:
         return True
 
     # ---------- Diplomacia ----------
+    def get_relation(self, other):
+        return self.relations.get(other.name, 50)
+
+    def adjust_relation(self, other, amount):
+        relation = max(0, min(100, self.get_relation(other) + amount))
+        self.relations[other.name] = relation
+        other.relations[self.name] = relation
+        return relation
+
+    def has_treaty(self, other, treaty):
+        return treaty in self.treaties.get(other.name, set())
+
+    def _can_negotiate(self, other):
+        return (
+            other is not self
+            and not self.eliminated
+            and not other.eliminated
+            and self.diplomacy.get(
+                other.name, DiplomacyStatus.NEUTRAL) != DiplomacyStatus.WAR
+        )
+
+    def improve_relations(self, other):
+        cost = {'Energy': 25}
+        if (not self._can_negotiate(other)
+                or self.get_relation(other) >= 100
+                or not self.pay_cost(cost)):
+            return False
+        self.adjust_relation(other, 10)
+        return True
+
+    def offer_treaty(self, other, treaty):
+        thresholds = {'non_aggression': 45, 'trade': 55}
+        if treaty not in thresholds or not self._can_negotiate(other):
+            return False
+        if self.has_treaty(other, treaty):
+            return True
+        if self.get_relation(other) < thresholds[treaty]:
+            return False
+        self.treaties.setdefault(other.name, set()).add(treaty)
+        other.treaties.setdefault(self.name, set()).add(treaty)
+        return True
+
     def update_diplomacy(self, other, new_status):
+        old_status = self.diplomacy.get(other.name, DiplomacyStatus.NEUTRAL)
         self.diplomacy[other.name] = new_status
         other.diplomacy[self.name] = new_status
         if new_status == DiplomacyStatus.WAR:
@@ -534,6 +584,10 @@ class Faction:
             other.war_declarations.add(self.name)
             self.allies.discard(other.name)
             other.allies.discard(self.name)
+            self.treaties.pop(other.name, None)
+            other.treaties.pop(self.name, None)
+            if old_status != DiplomacyStatus.WAR:
+                self.adjust_relation(other, -20)
         elif new_status == DiplomacyStatus.ALLY:
             self.allies.add(other.name)
             other.allies.add(self.name)
@@ -545,6 +599,9 @@ class Faction:
             other.war_declarations.discard(self.name)
             self.allies.discard(other.name)
             other.allies.discard(self.name)
+            if (old_status == DiplomacyStatus.WAR
+                    and new_status == DiplomacyStatus.PEACE):
+                self.adjust_relation(other, 10)
 
     def compute_strength(self) -> dict:
         """Força total comparável entre facções.
@@ -575,13 +632,18 @@ class Faction:
             return False
         if status == DiplomacyStatus.ALLY:
             return True
+        if (self.get_relation(other) < 70
+                or not self.has_treaty(other, 'trade')):
+            return False
         self.update_diplomacy(other, DiplomacyStatus.ALLY)
+        self.adjust_relation(other, 10)
         return True
 
     def break_alliance(self, other) -> bool:
         if self.diplomacy.get(other.name) != DiplomacyStatus.ALLY:
             return False
         self.update_diplomacy(other, DiplomacyStatus.NEUTRAL)
+        self.adjust_relation(other, -15)
         return True
     
 

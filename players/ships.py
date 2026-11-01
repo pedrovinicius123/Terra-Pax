@@ -243,48 +243,54 @@ class Transport(Ship):
         super().__init__(**kwargs)
         self.resource = resource
         self.load = 0.0
+        self.destination = None
 
     def tick(self):
         while self.running and self.alive:
-            colonies = [p for p in self.faction.colonies.values()
-                        if p is not self.faction.home_planet]
-            if not colonies:
+            logistics = self.faction.logistics_manager
+            if self.load <= 0:
+                route = logistics.plan_transport_trip(
+                    self.resource, self.cargo)
+                if route is None:
+                    self._wait_game_time(3)
+                    continue
+                source, destination, amount = route
+                path = self.find_path_to_star(source.parent_star)
+                if path is None:
+                    self._wait_game_time(3)
+                    continue
+                self.activity = f"indo buscar {self.resource}"
+                for star in path:
+                    if not self.running or not self.alive:
+                        return
+                    self.move_to_star(self.current_position, star)
+                if not logistics.load_cargo(self, source, amount):
+                    self._wait_game_time(1)
+                    continue
+                self.destination = destination
+
+            destination = self.destination
+            if destination is None:
+                destination = logistics.plan_delivery(
+                    self.resource, self.load)
+                if destination is None:
+                    self._wait_game_time(3)
+                    continue
+                self.destination = destination
+
+            path = self.find_path_to_star(destination.parent_star)
+            if path is None:
                 self._wait_game_time(3)
                 continue
+            self.activity = f"transportando {self.resource}"
+            for star in path:
+                if not self.running or not self.alive:
+                    return
+                self.move_to_star(self.current_position, star)
 
-            if self.load <= 0:
-                source = max(self.faction.colonies.values(),
-                             key=lambda p: p.planet_resources.get(self.resource, 0))
-                if source.planet_resources.get(self.resource, 0) < self.cargo * 0.5:
-                    self._wait_game_time(3)
-                    continue
-                path = self.find_path_to_star(source.parent_star)
-                if not path:
-                    self._wait_game_time(3)
-                    continue
-                for star in path:
-                    if not self.running or not self.alive:
-                        return
-                    self.move_to_star(self.current_position, star)
-                take = min(self.cargo, source.planet_resources.get(self.resource, 0))
-                source.planet_resources[self.resource] -= take
-                self.load = take
-                self.activity = f"carregando {self.resource}"
-            else:
-                dest = min(self.faction.colonies.values(),
-                           key=lambda p: p.planet_resources.get(self.resource, 0))
-                path = self.find_path_to_star(dest.parent_star)
-                if not path:
-                    self._wait_game_time(3)
-                    continue
-                for star in path:
-                    if not self.running or not self.alive:
-                        return
-                    self.move_to_star(self.current_position, star)
-                dest.planet_resources[self.resource] = (
-                    dest.planet_resources.get(self.resource, 0) + self.load)
-                self.load = 0.0
-                self.activity = "idle"
+            delivered = logistics.deliver_cargo(self, destination)
+            self.activity = f"entregue {delivered:.0f} {self.resource}"
+            self.destination = None
             self._wait_game_time(1)
 
 

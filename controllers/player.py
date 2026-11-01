@@ -36,6 +36,12 @@ class PlayerController(BaseController):
     def break_alliance(self, other):
         return self.faction.break_alliance(other)
 
+    def improve_relations(self, other):
+        return self.faction.improve_relations(other)
+
+    def offer_treaty(self, other, treaty):
+        return self.faction.offer_treaty(other, treaty)
+
     def send_colony_ship(self, star, planet):
         if planet is None or planet.is_colonized:
             return False

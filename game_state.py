@@ -73,6 +73,7 @@ class GameState:
                 try:
                     f._recompute_resources()
                     f.process_research(dt)
+                    f.logistics_manager.update()
                 except Exception as e:
                     print(f"[faction {f.name}] {e}")
 
@@ -102,6 +103,8 @@ class GameState:
                 continue
             for s2 in warships[i + 1:]:
                 if not s2.alive or s1.faction is s2.faction:
+                    continue
+                if s2.faction.name not in s1.faction.war_declarations:
                     continue
                 if s2.faction.name in s1.faction.allies:
                     continue

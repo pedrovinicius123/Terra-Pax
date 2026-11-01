@@ -1,1 +1,5 @@
 task_terra_pax.md
+*/__pycache__
+build/
+*.so
+*.o
