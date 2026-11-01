@@ -717,7 +717,7 @@ class GameUI:
                 treaty_text = ", ".join(treaties) or "sem tratados"
                 self._panel_buttons.append(_FakeLabel(
                     (x0 + 4, y, w - 4, 14),
-                    f"Relação {relation:3d}/100 · {treaty_text}",
+                    f"Relação {relation:3f}/100 · {treaty_text}",
                     self.f_small, color=ratio_col))
                 y += 16
                 self._panel_buttons.append(_FakeLabel(

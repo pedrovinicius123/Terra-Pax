@@ -239,58 +239,266 @@ class ColonyShip(Ship):
 
 
 class Transport(Ship):
+    RESOURCE_TYPES = (
+        'Food', 'Minerals', 'Energy', 'Electronics', 'Chemicals', 'Alloys',
+    )
+
     def __init__(self, resource='Minerals', **kwargs):
         super().__init__(**kwargs)
         self.resource = resource
         self.load = 0.0
+        self.population_cargo = 0.0
+        self.mission_kind = None
+        self.source = None
         self.destination = None
+        self._prefer_population = True
+
+    def plan_population_transfer(self):
+        best_route = None
+        best_score = 0.0
+        for source in self.faction.colonies.values():
+            if (not source.is_colonized
+                    or source.faction is not self.faction
+                    or not self._route_is_reachable(source, source)):
+                continue
+            source_population = float(source.population)
+            source_capacity = source.capacity_info()['max_pop']
+            source_ratio = source_population / max(1.0, source_capacity)
+            source_available = max(
+                0.0, source_population - max(100.0, source_population * 0.1))
+            if source_population < 250 or source_available < 50:
+                continue
+
+            for destination in self.faction.colonies.values():
+                if destination is source:
+                    continue
+                if (not destination.is_colonized
+                        or destination.faction is not self.faction):
+                    continue
+                if not self._route_is_reachable(source, destination):
+                    continue
+                destination_capacity = (
+                    destination.capacity_info()['max_pop'])
+                destination_population = float(destination.population)
+                destination_ratio = (
+                    destination_population / max(1.0, destination_capacity))
+                if source_ratio <= destination_ratio:
+                    continue
+
+                room = max(0.0, destination_capacity - destination_population)
+                amount = min(
+                    self.cargo,
+                    source_available,
+                    room,
+                    (source_population - destination_population) * 0.5,
+                )
+                if amount < 50:
+                    continue
+                score = amount * (source_ratio - destination_ratio)
+                if score > best_score:
+                    best_score = score
+                    best_route = source, destination, amount
+        return best_route
+
+    def _plan_resource_transfer(self):
+        best_route = None
+        best_score = 0.0
+        logistics = self.faction.logistics_manager
+        for resource in self.RESOURCE_TYPES:
+            route = logistics.plan_transport_trip(resource, self.cargo)
+            if route is None:
+                continue
+            source, destination, amount = route
+            if not self._route_is_reachable(source, destination):
+                continue
+            capacity = destination.storage_capacity.get(resource, 0.0)
+            stored = destination.planet_resources.get(resource, 0.0)
+            deficit = max(0.0, 1.0 - stored / max(1.0, capacity))
+            priority = 1.5 if resource == 'Food' else 1.0
+            score = amount * deficit * priority
+            if score > best_score:
+                best_score = score
+                best_route = resource, source, destination, amount
+        return best_route
+
+    def _route_is_reachable(self, source, destination):
+        return (
+            nx.has_path(
+                self.map_G, self.current_position.name,
+                source.parent_star.name)
+            and nx.has_path(
+                self.map_G, source.parent_star.name,
+                destination.parent_star.name)
+        )
+
+    def _load_population(self, source, amount):
+        with source.lock:
+            if (source.faction is not self.faction
+                    or not source.is_colonized):
+                return False
+            available = max(
+                0.0, source.population
+                - max(100.0, source.population * 0.1))
+            loaded = min(amount, available, self.cargo)
+            if loaded <= 0:
+                return False
+            source.population -= loaded
+            self.population_cargo = loaded
+            return True
+
+    def _deliver_population(self, destination):
+        with destination.lock:
+            if (destination.faction is not self.faction
+                    or not destination.is_colonized):
+                return 0.0
+            capacity = destination.capacity_info()['max_pop']
+            room = max(0.0, capacity - destination.population)
+            delivered = min(self.population_cargo, room)
+            destination.population += delivered
+            self.population_cargo -= delivered
+            return delivered
+
+    def _find_population_destination(self, origin):
+        destinations = []
+        for planet in self.faction.colonies.values():
+            if (planet is origin or not planet.is_colonized
+                    or planet.faction is not self.faction):
+                continue
+            capacity = planet.capacity_info()['max_pop']
+            population = float(planet.population)
+            room = capacity - population
+            if room <= 0:
+                continue
+            destinations.append(
+                (population / max(1.0, capacity), planet))
+        if not destinations:
+            return None
+        return min(destinations, key=lambda item: item[0])[1]
+
+    def _travel_to_planet(self, planet):
+        path = self.find_path_to_star(planet.parent_star)
+        if path is None:
+            return False
+        for star in path:
+            if not self.running or not self.alive:
+                return False
+            self.move_to_star(self.current_position, star)
+        return self.running and self.alive
+
+    def _clear_mission(self, completed=False):
+        self.load = 0.0
+        self.population_cargo = 0.0
+        self.mission_kind = None
+        self.source = None
+        self.destination = None
+        if completed:
+            self._prefer_population = not self._prefer_population
 
     def tick(self):
         while self.running and self.alive:
             logistics = self.faction.logistics_manager
-            if self.load <= 0:
-                route = logistics.plan_transport_trip(
-                    self.resource, self.cargo)
+            has_cargo = (
+                self.population_cargo > 1e-6
+                if self.mission_kind == 'population'
+                else self.load > 1e-6
+            )
+            if not has_cargo:
+                migration_route = self.plan_population_transfer()
+                resource_route = self._plan_resource_transfer()
+                if self._prefer_population:
+                    mission = (
+                        ('population', migration_route)
+                        if migration_route is not None
+                        else ('resource', resource_route)
+                    )
+                else:
+                    mission = (
+                        ('resource', resource_route)
+                        if resource_route is not None
+                        else ('population', migration_route)
+                    )
+                mission_kind, route = mission
                 if route is None:
                     self._wait_game_time(3)
                     continue
-                source, destination, amount = route
-                path = self.find_path_to_star(source.parent_star)
-                if path is None:
-                    self._wait_game_time(3)
-                    continue
-                self.activity = f"indo buscar {self.resource}"
-                for star in path:
+
+                if mission_kind == 'population':
+                    source, destination, amount = route
+                    self.mission_kind = 'population'
+                else:
+                    self.resource, source, destination, amount = route
+                    self.mission_kind = 'resource'
+                self.source = source
+                self.destination = destination
+                self.activity = (
+                    "indo buscar migrantes"
+                    if self.mission_kind == 'population'
+                    else f"indo buscar {self.resource}"
+                )
+                if not self._travel_to_planet(source):
                     if not self.running or not self.alive:
                         return
-                    self.move_to_star(self.current_position, star)
-                if not logistics.load_cargo(self, source, amount):
+                    self._clear_mission()
+                    self._wait_game_time(3)
+                    continue
+                loaded = (
+                    self._load_population(source, amount)
+                    if self.mission_kind == 'population'
+                    else logistics.load_cargo(self, source, amount)
+                )
+                if not loaded:
+                    self._clear_mission()
                     self._wait_game_time(1)
                     continue
-                self.destination = destination
 
             destination = self.destination
             if destination is None:
-                destination = logistics.plan_delivery(
-                    self.resource, self.load)
+                if self.mission_kind == 'population':
+                    destination = self._find_population_destination(
+                        self.source)
+                else:
+                    destination = logistics.plan_delivery(
+                        self.resource, self.load, origin=self.source)
                 if destination is None:
                     self._wait_game_time(3)
                     continue
                 self.destination = destination
 
-            path = self.find_path_to_star(destination.parent_star)
-            if path is None:
-                self._wait_game_time(3)
-                continue
-            self.activity = f"transportando {self.resource}"
-            for star in path:
+            self.activity = (
+                "migrando população"
+                if self.mission_kind == 'population'
+                else f"transportando {self.resource}"
+            )
+            if not self._travel_to_planet(destination):
                 if not self.running or not self.alive:
                     return
-                self.move_to_star(self.current_position, star)
+                self.destination = None
+                self._wait_game_time(3)
+                continue
+            delivered = (
+                self._deliver_population(destination)
+                if self.mission_kind == 'population'
+                else logistics.deliver_cargo(self, destination)
+            )
+            if delivered <= 0:
+                self.destination = None
+                self._wait_game_time(1)
+                continue
 
-            delivered = logistics.deliver_cargo(self, destination)
-            self.activity = f"entregue {delivered:.0f} {self.resource}"
-            self.destination = None
+            remaining = (
+                self.population_cargo
+                if self.mission_kind == 'population'
+                else self.load
+            )
+            self.activity = (
+                f"migração de {delivered:.0f} habitantes concluída"
+                if self.mission_kind == 'population'
+                else f"entregue {delivered:.0f} {self.resource}"
+            )
+            if remaining <= 1e-6:
+                self._clear_mission(completed=True)
+            else:
+                self.destination = None
             self._wait_game_time(1)
 
 

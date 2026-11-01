@@ -42,14 +42,15 @@ class GalaxySelectionScreen:
         screen = self.screen
         width, height = screen.get_size()
         screen.fill((7, 12, 25))
+        header_y = height // 3 - 32
         title = self.title_font.render(
             "ESCOLHA O TAMANHO DA GALÁXIA", True, (224, 237, 247))
-        screen.blit(title, title.get_rect(center=(width // 2, height // 3)))
+        screen.blit(title, title.get_rect(center=(width // 2, header_y)))
         subtitle = self.small_font.render(
-            "Use as setas e Enter, ou clique em uma opção.",
+            "Use as setas e Enter ou clique; só a condição escolhida encerra.",
             True, (136, 160, 181))
         screen.blit(
-            subtitle, subtitle.get_rect(center=(width // 2, height // 3 + 46)))
+            subtitle, subtitle.get_rect(center=(width // 2, header_y + 46)))
 
         columns = max(1, min(3, (width - 48) // 220))
         rows = (len(self.OPTIONS) + columns - 1) // columns

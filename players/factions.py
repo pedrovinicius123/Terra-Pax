@@ -99,7 +99,7 @@ DESIGNS = {
     },
     'transport': {
         'class': Transport, 'display': 'Transporte',
-        'description': 'Move recursos', 'build_time': 4,
+        'description': 'Move recursos e população', 'build_time': 4,
         'cost': {'Minerals': 50, 'Food': 20, 'Electronics': 20},
         'stats': {'speed': 5, 'hull': 40, 'shields': 5, 'weapons': 0,
                   'cargo': 500, 'resource': 'Minerals'},

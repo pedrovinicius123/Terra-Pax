@@ -145,9 +145,11 @@ visualizador 3D.
 A pasta `logistics/` contém a política de logística automática e o visualizador
 3D integrado à interface principal. Cada facção encomenda transportadores
 civis conforme cresce o número de colônias (até quatro naves). Os transportes
-procuram colônias com excedente e espaço de armazenamento, carregam minerais e
-fazem as entregas por rotas do mapa; cargas não entregues são mantidas a bordo
-até que uma colônia tenha capacidade.
+procuram colônias com excedente e espaço de armazenamento, equilibram comida,
+minerais, energia, eletrônicos, químicos e ligas, e migram população de mundos
+mais povoados para colônias menos habitadas. A migração mantém uma reserva
+mínima na origem; cargas não entregues ficam a bordo até que outra colônia
+tenha capacidade.
 
 O visualizador 3D é renderizado em software pelo Pygame, usa as mesmas
 categorias e sementes procedurais dos planetas 2D e não baixa imagens nem

@@ -2,6 +2,7 @@ import random
 import unittest
 from types import SimpleNamespace
 
+import networkx as nx
 import numpy as np
 import pygame
 
@@ -11,15 +12,17 @@ from graphics.planet_generator import (
     generate_city_light_texture,
     generate_planet_land_mask,
 )
-from graphics.star import Planet
+from graphics.star import Planet, Star
 from controllers.player import PlayerController
 from main import GALAXY_LAYOUTS
 from players.factions import (
+    DESIGNS,
     GALACTIC_WONDERS,
     TECH_CAPS,
     Faction,
     FactionType,
 )
+from players.ships import Transport
 from ui.faction_selection import FactionCustomizationScreen
 from ui.galaxy_selection import (
     GalaxySelectionScreen,
@@ -173,6 +176,23 @@ class VictoryAndCalendarTests(unittest.TestCase):
         scientific_cost = self.player.get_research_cost("ftl")
         self.assertGreater(scientific_cost, standard_cost)
 
+    def test_only_the_selected_victory_condition_ends_the_match(self):
+        state = self.make_state("standard")
+        self.player.allies.add(self.opponent.name)
+        for field in self.player.tech_tree:
+            self.player.tech_tree[field] = TECH_CAPS[field]
+        self.player.home_planet.planet_resources["Credits"] = 10_000
+        self.player._recompute_resources()
+
+        state._check_victory()
+        self.assertIsNone(state.winner)
+
+        state.time = 850 * 12
+        self.player.home_planet.defense = 1000
+        self.opponent.home_planet.defense = 100
+        state._check_victory()
+        self.assertIs(state.winner, self.player)
+
     def test_economic_victory_requires_dominating_rivals(self):
         state = self.make_state("economic")
         self.player.home_planet.planet_resources["Credits"] = 10_000
@@ -325,6 +345,79 @@ class CityGenerationTests(unittest.TestCase):
             pygame.surfarray.array_alpha(second))
         self.assertTrue(np.all(alpha[~land] == 0))
         self.assertTrue(np.any(alpha[land] > 0))
+
+
+class TransportUtilityTests(unittest.TestCase):
+    def setUp(self):
+        self.graph = nx.Graph()
+        self.source_star = Star(
+            "Source", 1000, 10, 10, (0.0, 0.0), [])
+        self.destination_star = Star(
+            "Destination", 1000, 10, 10, (100.0, 0.0), [])
+
+        def make_planet(name, star):
+            planet = Planet(
+                n_planet_resources=0, planet_resources={},
+                abs_position=star.position,
+                life_suitability={"Human": 1.0},
+                production=1.0, developement=0.3,
+                distance_from_star=1.0, radius=1.0,
+                is_colonized=False, name=name,
+                star_position=star.position)
+            planet.post_init()
+            planet.parent_star = star
+            star.planets.append(planet)
+            return planet
+
+        home = make_planet("Home", self.source_star)
+        self.faction = Faction(
+            "Migrants", FactionType.HUMAN, home, self.source_star)
+        destination = make_planet("Colony", self.destination_star)
+        self.faction.establish_colony(self.destination_star, destination)
+        self.graph.add_edge(
+            self.source_star.name, self.destination_star.name, weight=100.0)
+        self.faction.map_G = self.graph
+        self.faction.all_stars = [self.source_star, self.destination_star]
+        GameState(
+            self.graph, self.faction.all_stars, [self.faction])
+        self.transport = Transport(
+            ship_id="MIG-001", faction=self.faction, map_G=self.graph,
+            current_position=self.source_star,
+            total_stars=self.faction.all_stars, design_key="transport",
+            **DESIGNS["transport"]["stats"])
+
+    def test_transporters_move_surplus_population_between_colonies(self):
+        source = self.faction.home_planet
+        destination = self.faction.colonies["Colony"]
+        source.population = 1000
+        destination.population = 100
+        initial_population = source.population + destination.population
+
+        route = self.transport.plan_population_transfer()
+        self.assertIsNotNone(route)
+        planned_source, planned_destination, amount = route
+        self.assertIs(planned_source, source)
+        self.assertIs(planned_destination, destination)
+
+        self.assertTrue(self.transport._load_population(source, amount))
+        self.assertGreater(
+            self.transport._deliver_population(destination), 0)
+        self.assertAlmostEqual(
+            source.population + destination.population, initial_population)
+        self.assertEqual(self.transport.population_cargo, 0)
+        self.assertGreaterEqual(source.population, 100)
+
+    def test_transporters_balance_food_as_well_as_minerals(self):
+        source = self.faction.home_planet
+        destination = self.faction.colonies["Colony"]
+        source.planet_resources["Food"] = 1500
+
+        route = self.transport._plan_resource_transfer()
+
+        self.assertIsNotNone(route)
+        self.assertEqual(route[0], "Food")
+        self.assertIs(route[1], source)
+        self.assertIs(route[2], destination)
 
 
 if __name__ == "__main__":
