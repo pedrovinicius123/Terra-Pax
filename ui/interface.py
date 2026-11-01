@@ -2,7 +2,13 @@ import math
 import numpy as np
 import pygame
 
-from players.factions import DESIGNS, DiplomacyStatus
+from players.factions import (
+    DESIGNS,
+    DiplomacyStatus,
+    FACTION_TRAITS,
+    GALACTIC_WONDERS,
+    TECH_CAPS,
+)
 from players.ships import ColonyShip, Scout, Transport, Warship
 from graphics.planet_generator import (
     city_light_intensity,
@@ -43,6 +49,7 @@ class C:
         'Electronics': (110, 160, 255),
         'Chemicals':   (200, 110, 200),
         'Alloys':      (200, 150, 100),
+        'Credits':     (255, 205, 85),
         'Research':    (110, 255, 210),
     }
 
@@ -157,6 +164,7 @@ class GameUI:
         self.state = state
         self.player = player_ctrl
         self.faction = player_ctrl.faction
+        self.restart_requested = False
 
         self.zoom = self.DEFAULT_ZOOM
         self.off_x = 0
@@ -236,10 +244,15 @@ class GameUI:
     # ---------- Botões ----------
     def _build_top_buttons(self):
         self._top_buttons = [
-            Button((self.W - 340, 6, 80, 24), "Pause", self._toggle_pause),
-            Button((self.W - 250, 6, 50, 24), "1x", lambda: self._set_speed(1.0)),
-            Button((self.W - 194, 6, 50, 24), "2x", lambda: self._set_speed(2.0)),
-            Button((self.W - 138, 6, 50, 24), "5x", lambda: self._set_speed(5.0)),
+            Button((self.W - 382, 6, 72, 24), "Pausa", self._toggle_pause),
+            Button((self.W - 302, 6, 42, 24), "1x",
+                   lambda: self._set_speed(1.0)),
+            Button((self.W - 252, 6, 42, 24), "2x",
+                   lambda: self._set_speed(2.0)),
+            Button((self.W - 202, 6, 42, 24), "5x",
+                   lambda: self._set_speed(5.0)),
+            Button((self.W - 148, 6, 138, 24), "NOVO JOGO",
+                   self._request_restart),
         ]
 
     def _build_filter_buttons(self):
@@ -298,6 +311,9 @@ class GameUI:
     def _toggle_pause(self):
         self.state.paused = not self.state.paused
         self.log_msg("Pausado" if self.state.paused else "Retomado")
+
+    def _request_restart(self):
+        self.restart_requested = True
 
     def _set_speed(self, s):
         self.state.speed = s
@@ -388,8 +404,17 @@ class GameUI:
             self.log_msg(f"Aliança: {other.name}")
             self._rebuild_panel_buttons()
         else:
+            threshold = 85 if self.state.victory_mode == 'diplomatic' else 70
             self.log_msg(
-                "Aliança exige comércio ativo e relação ≥ 70")
+                f"Aliança exige comércio ativo e relação ≥ {threshold}")
+
+    def _build_wonder(self, wonder_type):
+        wonder = GALACTIC_WONDERS[wonder_type]
+        if self.faction.build_wonder(wonder_type):
+            self.log_msg(f"Maravilha construída: {wonder['name']}")
+        else:
+            self.log_msg("Maravilha indisponível ou recursos insuficientes")
+        self._rebuild_panel_buttons()
 
     def _break_alliance(self, other):
         if self.player.break_alliance(other):
@@ -440,16 +465,20 @@ class GameUI:
         w = self.PANEL_W - 20
         f = self.faction
         self._panel_content_height = 0
+        alliance_threshold = (
+            85 if self.state.victory_mode == 'diplomatic' else 70)
 
         if self.active_tab == 'research':
             y = content_y + 24   # pula linha do cabeçalho
             for field in f.tech_tree:
                 self._panel_buttons.append(Button(
                     (x0 + w - 52, y - 2, 22, 18), "-",
-                    lambda fl=field: self._adjust_weight(fl, -0.5)))
+                    lambda fl=field: self._adjust_weight(fl, -0.5),
+                    enabled=lambda fl=field: not f.is_tech_capped(fl)))
                 self._panel_buttons.append(Button(
                     (x0 + w - 28, y - 2, 22, 18), "+",
-                    lambda fl=field: self._adjust_weight(fl, +0.5)))
+                    lambda fl=field: self._adjust_weight(fl, +0.5),
+                    enabled=lambda fl=field: not f.is_tech_capped(fl)))
                 y += 40
             self._panel_buttons.append(Button(
                 (x0, y + 2, w, 22), "Reset pesos (1x cada)",
@@ -460,13 +489,40 @@ class GameUI:
             y = viewport.top + 8
             for key, d in DESIGNS.items():
                 btn = Button((x0, y, w, 22),
-                             f"{d['display']}  [{d['build_time']} anos]",
+                             f"{d['display']}  [{d['build_time']} meses]",
                              lambda k=key: self._build(k),
                              enabled=lambda dd=d: f.can_afford(dd['cost']))
                 self._panel_buttons.append(btn)
                 y += 24
                 cost_txt = "  ".join(
                     f"{k}:{int(v)}" for k, v in d['cost'].items())
+                self._panel_buttons.append(_FakeLabel(
+                    (x0 + 4, y, w, 12), cost_txt, self.f_small))
+                y += 14
+            y += 6
+            self._panel_buttons.append(_FakeLabel(
+                (x0, y, w, 18), "MARAVILHAS GALÁCTICAS",
+                self.f_small, color=C.ACCENT))
+            y += 20
+            for wonder_type, wonder in GALACTIC_WONDERS.items():
+                owner = self.state.wonders_built.get(wonder_type)
+                label = (
+                    f"{wonder['name']}  ·  concluída por {owner}"
+                    if owner else wonder['name'])
+                self._panel_buttons.append(Button(
+                    (x0, y, w, 22), label,
+                    lambda kind=wonder_type: self._build_wonder(kind),
+                    enabled=lambda kind=wonder_type, data=wonder: (
+                        kind not in self.state.wonders_built
+                        and f.can_afford(data['cost']))))
+                y += 24
+                cost_txt = "  ".join(
+                    f"{resource}:{int(amount)}"
+                    for resource, amount in wonder['cost'].items())
+                self._panel_buttons.append(_FakeLabel(
+                    (x0 + 4, y, w, 12), wonder['description'],
+                    self.f_small))
+                y += 13
                 self._panel_buttons.append(_FakeLabel(
                     (x0 + 4, y, w, 12), cost_txt, self.f_small))
                 y += 14
@@ -730,7 +786,7 @@ class GameUI:
                         (x0, y, 140, 20), "Propor aliança",
                         lambda o=other: self._propose_alliance(o),
                         enabled=lambda o=other: (
-                            f.get_relation(o) >= 70
+                            f.get_relation(o) >= alliance_threshold
                             and f.has_treaty(o, 'trade'))))
                 y += 24
             self._panel_content_height = y - viewport.top
@@ -976,6 +1032,24 @@ class GameUI:
         if self.planet_viewer is not None and self.selected_planet is not None:
             self.planet_viewer.draw(
                 self.screen, self.selected_planet, self.f_title, self.f_small)
+        if self.state.game_over:
+            self._draw_victory()
+
+    def _draw_victory(self):
+        overlay = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
+        overlay.fill((3, 8, 18, 190))
+        self.screen.blit(overlay, (0, 0))
+        winner = self.state.winner
+        outcome = "VOCÊ VENCEU" if winner is self.faction else "FIM DE JOGO"
+        title = self.f_title.render(outcome, True, C.ACCENT)
+        detail = self.f.render(
+            f"{winner.name} conquistou a vitória "
+            f"{self.state.VICTORY_MODES[self.state.victory_mode]}.",
+            True, C.TEXT)
+        self.screen.blit(title, title.get_rect(
+            center=(self.W // 2, self.H // 2 - 24)))
+        self.screen.blit(detail, detail.get_rect(
+            center=(self.W // 2, self.H // 2 + 8)))
 
     def _draw_panel_buttons(self):
         if self.active_tab not in self._scrollable_tabs:
@@ -1237,14 +1311,21 @@ class GameUI:
 
         title = self.f_title.render("TERRA PAX", True, C.TEXT)
         self.screen.blit(title, (10, 8))
-        year_rect = pygame.Rect(128, 5, 116, 26)
+        year_rect = pygame.Rect(128, 5, 132, 26)
         pygame.draw.rect(self.screen, (22, 47, 67), year_rect,
                          border_radius=5)
         pygame.draw.rect(self.screen, C.ACCENT, year_rect, 1,
                          border_radius=5)
         year_text = self.f_med.render(
-            f"ANO {self.state.year}", True, C.ACCENT)
+            f"{self.state.month[:3].upper()} {self.state.year}",
+            True, C.ACCENT)
         self.screen.blit(year_text, year_text.get_rect(center=year_rect.center))
+        mode_rect = pygame.Rect(270, 5, 210, 26)
+        mode_label = self.state.VICTORY_MODES[self.state.victory_mode]
+        mode_text = self.f_small.render(
+            f"VITÓRIA: {mode_label.upper()}", True, C.TEXT)
+        self.screen.blit(mode_text, mode_text.get_rect(
+            center=mode_rect.center))
 
         war_n = len(self.faction.war_declarations)
         ally_n = len(self.faction.allies)
@@ -1253,11 +1334,11 @@ class GameUI:
             f"guerras {war_n}  aliados {ally_n}  |  {self.state.speed:g}x",
             True, C.DIM,
         )
-        status_right = self.W - self.PANEL_W - 250
-        if status_right > 258:
-            self.screen.set_clip(pygame.Rect(258, 0, status_right - 258,
+        status_right = self.W - self.PANEL_W - 20
+        if status_right > 490:
+            self.screen.set_clip(pygame.Rect(490, 0, status_right - 490,
                                              self.TOP_H))
-            self.screen.blit(status, (258, 12))
+            self.screen.blit(status, (490, 12))
             self.screen.set_clip(None)
 
     def _draw_panel(self):
@@ -1330,7 +1411,8 @@ class GameUI:
 
                 # Linha 1: nome / nível / peso
                 self.screen.blit(self.f_small.render(
-                    f"{field:12s} Lv{lvl}  {share:5.1f}%",
+                    f"{field:12s} Lv{lvl}/{TECH_CAPS[field]}  "
+                    f"{share:5.1f}%",
                     True, C.TEXT), (x0 + 10, y))
                 y += 16
 
@@ -1384,6 +1466,12 @@ class GameUI:
                 self.screen.blit(self.f_small.render(desc, True, C.DIM),
                                  (x0 + 10, y))
                 y += 14
+            advantage = FACTION_TRAITS[f.advantage][0]
+            disadvantage = FACTION_TRAITS[f.disadvantage][0]
+            self.screen.blit(self.f_small.render(
+                f"Vantagem: {advantage}  ·  Desvantagem: {disadvantage}",
+                True, C.DIM), (x0 + 10, y))
+            y += 14
             self.screen.blit(self.f_small.render(
                 f"Guerras: {len(f.war_declarations)}   "
                 f"Aliados: {len(f.allies)}   "

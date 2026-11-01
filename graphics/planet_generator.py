@@ -327,6 +327,59 @@ def generate_planet_land_mask(
     return (land_mask >= 0.5).copy()
 
 
+def _settlement_site_weights(
+        land_mask: np.ndarray, terrain: np.ndarray,
+        latitude: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    land = land_mask >= 0.5
+    north = np.zeros_like(land)
+    south = np.zeros_like(land)
+    north[1:] = land[:-1]
+    south[:-1] = land[1:]
+    east = np.roll(land, 1, axis=1)
+    west = np.roll(land, -1, axis=1)
+    coast = land & ~(north & south & east & west)
+    coast_influence = coast.astype(np.float32)
+    for offset in (1, 2):
+        north_coast = np.zeros_like(coast)
+        south_coast = np.zeros_like(coast)
+        north_coast[offset:] = coast[:-offset]
+        south_coast[:-offset] = coast[offset:]
+        coast_influence = np.maximum(
+            coast_influence,
+            north_coast.astype(np.float32) / (offset + 1))
+        coast_influence = np.maximum(
+            coast_influence,
+            south_coast.astype(np.float32) / (offset + 1))
+        coast_influence = np.maximum(
+            coast_influence,
+            np.roll(coast, offset, axis=1).astype(np.float32) / (offset + 1))
+        coast_influence = np.maximum(
+            coast_influence,
+            np.roll(coast, -offset, axis=1).astype(np.float32)
+            / (offset + 1))
+
+    terrain_variation = np.zeros_like(terrain, dtype=np.float32)
+    north_terrain = np.empty_like(terrain)
+    south_terrain = np.empty_like(terrain)
+    north_terrain[0] = terrain[0]
+    north_terrain[1:] = terrain[:-1]
+    south_terrain[-1] = terrain[-1]
+    south_terrain[:-1] = terrain[1:]
+    terrain_variation += np.abs(terrain - north_terrain)
+    terrain_variation += np.abs(terrain - south_terrain)
+    terrain_variation += np.abs(terrain - np.roll(terrain, 1, axis=1))
+    terrain_variation += np.abs(terrain - np.roll(terrain, -1, axis=1))
+    flatness = np.clip(1.0 - terrain_variation * 2.0, 0.15, 1.0)
+    temperate = np.clip(np.cos(latitude) ** 1.5, 0.12, 1.0)
+    moderate_elevation = np.exp(-((terrain - 0.48) / 0.3) ** 2)
+    weights = (
+        (0.35 + coast_influence * 1.4)
+        * flatness * temperate * (0.35 + moderate_elevation)
+        * land
+    )
+    return land, weights.astype(np.float64)
+
+
 def generate_city_light_texture(
         suitability: Mapping[str, float], seed: str,
         size: tuple[int, int], detail_level: int = 3) -> pygame.Surface:
@@ -336,17 +389,25 @@ def generate_city_light_texture(
         raise ValueError("Planet textures must be at least 32x16 pixels")
     if not isinstance(detail_level, int) or not 1 <= detail_level <= 8:
         raise ValueError("Texture detail must be an integer from 1 to 8")
-    _, land_mask, _, _ = _planet_fields(seed, size, detail_level)
-    land_pixels = np.argwhere(land_mask >= 0.5)
+    _, land_mask, terrain, latitude = _planet_fields(
+        seed, size, detail_level)
+    land, site_weights = _settlement_site_weights(
+        land_mask, terrain, latitude)
+    land_pixels = np.argwhere(land)
     light_strength = np.zeros((height, width), dtype=np.float32)
     if len(land_pixels):
         generator = random.Random(_stable_seed(f"{seed}:cities"))
         pixel_generator = np.random.default_rng(
             _stable_seed(f"{seed}:city-pixels"))
+        site_generator = np.random.default_rng(
+            _stable_seed(f"{seed}:city-sites"))
         count = max(80, min(320, width * height // 1200))
         base_radius = max(0.024, min(0.075, 4.0 * math.tau / width))
-        centers = generator.sample(
-            range(len(land_pixels)), min(count, len(land_pixels)))
+        probabilities = site_weights[land]
+        probabilities /= probabilities.sum()
+        centers = site_generator.choice(
+            len(land_pixels), min(count, len(land_pixels)),
+            replace=False, p=probabilities)
         for center_index in centers:
             center_y, center_x = land_pixels[center_index]
             latitude = (
@@ -417,10 +478,17 @@ def generate_city_networks(seed: str, count: int = 36):
     generator = random.Random(_stable_seed(f"{seed}:cities"))
     networks = []
     grid = (-0.72, -0.36, 0.0, 0.36, 0.72)
-    land_pixels = np.argwhere(
-        generate_planet_land_mask(seed, (720, 360), 3))
-    center_indices = generator.sample(
-        range(len(land_pixels)), min(max(0, count), len(land_pixels)))
+    _, land_mask, terrain, latitude = _planet_fields(
+        seed, (720, 360), 3)
+    land, site_weights = _settlement_site_weights(
+        land_mask, terrain, latitude)
+    land_pixels = np.argwhere(land)
+    probabilities = site_weights[land]
+    probabilities /= probabilities.sum()
+    site_generator = np.random.default_rng(_stable_seed(f"{seed}:city-sites"))
+    center_indices = site_generator.choice(
+        len(land_pixels), min(max(0, count), len(land_pixels)),
+        replace=False, p=probabilities)
 
     for center_index in center_indices:
         center_y, center_x = land_pixels[center_index]

@@ -42,6 +42,7 @@ def generate_traditional_star_name():
 
 def init_map(n_stars: int, sector_size: int, min_dist: int):
     stars = []
+    used_star_names = set()
     planet_letters = "bcdefghi"
     star_positions = []
     minimum_system_spacing = (
@@ -67,8 +68,16 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
         star_r = random.uniform(0.003, 0.005) * sector_size
         planet_r = random.uniform(0.0007, 0.0012) * sector_size
 
+        star_name = generate_traditional_star_name()
+        base_name = star_name
+        suffix = 2
+        while star_name in used_star_names:
+            star_name = f"{base_name}-{suffix}"
+            suffix += 1
+        used_star_names.add(star_name)
+
         star = Star(
-            name=generate_traditional_star_name(),
+            name=star_name,
             total_resources=random.uniform(1e4, 1e6),
             radius=star_r,
             green_zone=random.uniform(1, 2) * star_r,

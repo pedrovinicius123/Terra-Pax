@@ -3,36 +3,68 @@ import time
 import math
 from queue import Empty
 
+from players.factions import DiplomacyStatus
 from players.ships import Warship
 
 
 class GameState:
     START_YEAR = 2150
+    MONTH_NAMES = (
+        "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+        "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+    )
+    VICTORY_MODES = {
+        "diplomatic": "Diplomática",
+        "domination": "Dominação",
+        "economic": "Econômica",
+        "expansion": "Expansão",
+        "scientific": "Científica",
+        "standard": "Padrão",
+    }
 
-    def __init__(self, map_G, stars, factions, tick_interval=0.5):
+    def __init__(self, map_G, stars, factions, tick_interval=0.5,
+                 victory_mode="standard"):
+        if victory_mode not in self.VICTORY_MODES:
+            raise ValueError(f"Modo de vitória inválido: {victory_mode}")
         self.event_log = []
         self.map_G = map_G
         self.stars = stars
         self.factions = factions
+        self.victory_mode = victory_mode
         self.stars_by_name = {s.name: s for s in stars}
         self.time = 0.0
         self.speed = 1.0
         self.paused = False
         self.running = False
+        self.game_over = False
+        self.winner = None
+        self.wonders_built = {}
         self.tick_interval = tick_interval
         self.lock = threading.RLock()
         self._thread = None
-        self.event_log = []
         for f in factions:
             f.game_state = self
 
     @property
     def year(self):
-        return self.START_YEAR + math.floor(self.time + 1e-9)
+        return self.START_YEAR + math.floor(
+            (self.time + 1e-9) / 12)
+
+    @property
+    def month_index(self):
+        return math.floor(self.time + 1e-9) % 12
+
+    @property
+    def month(self):
+        return self.MONTH_NAMES[self.month_index]
+
+    @property
+    def date(self):
+        return f"{self.month} {self.year}"
 
     def log_event(self, msg):
         self.event_log.append((self.time, msg))
-        print(f"[{self.year}] {msg}")
+        print(f"[{self.date}] {msg}")
         
     def start(self):
         self.running = True
@@ -41,12 +73,14 @@ class GameState:
 
     def _loop(self):
         while self.running:
-            if not self.paused:
+            if not self.paused and not self.game_over:
                 self.tick(self.tick_interval * self.speed)
             time.sleep(self.tick_interval)
 
     def tick(self, dt):
         with self.lock:
+            if self.game_over:
+                return
             self.time += dt
 
             # 1. Crescimento e producao
@@ -80,6 +114,7 @@ class GameState:
             # 4. Combate e cercos
             self._resolve_combat(dt)
             self._resolve_sieges(dt)
+            self._process_wonders(dt)
 
             # 5. Controllers (IA / jogador)
             for f in self.factions:
@@ -89,6 +124,114 @@ class GameState:
                     f.controller.update(self, dt)
                 except Exception as e:
                     print(f"[ctrl {f.name}] {e}")
+
+            self._process_trade_income(dt)
+            self._check_victory()
+
+    def _process_trade_income(self, dt):
+        trade_factor = 4.0 if self.victory_mode == "economic" else 1.0
+        processed = set()
+        for faction in self.factions:
+            if faction.eliminated:
+                continue
+            for other_name, treaties in faction.treaties.items():
+                if "trade" not in treaties:
+                    continue
+                pair = frozenset((faction.name, other_name))
+                if pair in processed:
+                    continue
+                processed.add(pair)
+                other = next(
+                    (candidate for candidate in self.factions
+                     if candidate.name == other_name and not candidate.eliminated),
+                    None)
+                if other is None:
+                    continue
+                output = min(
+                    sum(p.production * p.developement
+                        for p in faction.colonies.values()),
+                    sum(p.production * p.developement
+                        for p in other.colonies.values()),
+                )
+                for partner in (faction, other):
+                    planet = partner.home_planet
+                    if planet is not None:
+                        credits = (
+                            output * partner.economy_multiplier * 0.1
+                            * dt * trade_factor)
+                        planet.planet_resources["Credits"] = min(
+                            planet.storage_capacity["Credits"],
+                            planet.planet_resources.get("Credits", 0.0)
+                            + credits)
+
+    def _process_wonders(self, dt):
+        if "diplomatic" not in self.wonders_built:
+            return
+        builder_name = self.wonders_built["diplomatic"]
+        builder = next(
+            (faction for faction in self.factions
+             if faction.name == builder_name and not faction.eliminated),
+            None)
+        if builder is None:
+            return
+        for other in self.factions:
+            if other is builder or other.eliminated:
+                continue
+            if builder.diplomacy.get(other.name) == DiplomacyStatus.WAR:
+                continue
+            builder.adjust_relation(other, 0.05 * dt)
+
+    def _check_victory(self):
+        active = [faction for faction in self.factions
+                  if not faction.eliminated]
+        if not active:
+            return
+
+        winner = None
+        if self.victory_mode == "diplomatic":
+            for faction in active:
+                if all(
+                        other is faction
+                        or other.name in faction.allies
+                        or other.eliminated
+                        for other in self.factions):
+                    winner = faction
+                    break
+        elif self.victory_mode == "domination" and len(active) == 1:
+            winner = active[0]
+        elif self.victory_mode == "economic":
+            ranked = sorted(
+                active, key=lambda faction: faction.economy_score(),
+                reverse=True)
+            if ranked[0].economy_score() >= sum(
+                    faction.economy_score() for faction in ranked[1:]) * 2:
+                winner = ranked[0]
+        elif self.victory_mode == "scientific":
+            winner = next(
+                (faction for faction in active
+                 if all(faction.is_tech_capped(field)
+                        for field in faction.tech_tree)),
+                None)
+
+        if winner is None and self.year >= 3000:
+            if self.victory_mode == "standard":
+                winner = max(
+                    active,
+                    key=lambda faction: faction.compute_strength()["total"])
+            elif self.victory_mode == "expansion":
+                winner = max(
+                    active,
+                    key=lambda faction: sum(
+                        planet.population
+                        for planet in faction.colonies.values()))
+        if winner is None:
+            return
+
+        self.winner = winner
+        self.game_over = True
+        self.paused = True
+        self.log_event(
+            f"{winner.name} venceu: {self.VICTORY_MODES[self.victory_mode]}")
 
     def _resolve_combat(self, dt):
         warships = []
@@ -110,16 +253,14 @@ class GameState:
                     continue
                 if math.dist(s1.abs_position, s2.abs_position) > 100:
                     continue
-                s1.take_damage(s2.weapons * dt)
-                s2.take_damage(s1.weapons * dt)
+                s1.take_damage(
+                    s2.weapons * s2.faction.combat_multiplier * dt / 12.0)
+                s2.take_damage(
+                    s1.weapons * s1.faction.combat_multiplier * dt / 12.0)
                 if not s1.alive or not s2.alive:
                     break
 
     def _resolve_sieges(self, dt):
-        try:
-            from players.factions import DiplomacyStatus
-        except Exception:
-            return
         siege_range = 200
         for f in self.factions:
             if f.eliminated:
@@ -146,7 +287,9 @@ class GameState:
                             continue
                         if planet.faction.name not in enemy_names:
                             continue
-                        dmg = ws.weapons * dt * 0.5
+                        dmg = (
+                            ws.weapons * ws.faction.combat_multiplier
+                            * dt * 0.5 / 12.0)
                         damage_by_planet[planet] = (
                             damage_by_planet.get(planet, 0.0) + dmg)
                         found = True
@@ -207,4 +350,6 @@ class GameState:
 
     def stop(self):
         self.running = False
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=max(1.0, self.tick_interval * 2))
         

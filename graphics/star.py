@@ -6,6 +6,12 @@ import time
 
 
 SIMULATION_STEP_YEARS = 0.5
+SIMULATION_STEP_MONTHS = 0.5
+ECONOMIC_RECIPES = {
+    'Electronics': {'Minerals': 0.35, 'Energy': 0.3},
+    'Chemicals': {'Energy': 0.4, 'Food': 0.15},
+    'Alloys': {'Minerals': 0.5, 'Energy': 0.2},
+}
 
 
 @dataclass(eq=False)
@@ -32,7 +38,7 @@ class Planet:
         self.storage_capacity = {
             'Minerals': 10_000, 'Food': 5_000, 'Energy': 10_000,
             'Electronics': 2_000, 'Chemicals': 2_000, 'Alloys': 1_000,
-            'Research': float('inf'),
+            'Credits': 10_000, 'Research': float('inf'),
         }
         self.faction = None
         self.ships = []
@@ -66,16 +72,40 @@ class Planet:
             'pop_capped': self.population >= max_pop - 1e-6,
         }
 
-    def develop(self, dt: float = SIMULATION_STEP_YEARS):
-        step_scale = dt / SIMULATION_STEP_YEARS
-        growth_factor = 1.02 ** step_scale
+    def develop(self, dt: float = SIMULATION_STEP_MONTHS):
+        step_scale = dt / (12.0 * SIMULATION_STEP_YEARS)
+        game_state = getattr(self.faction, 'game_state', None)
+        economic_mode = (
+            game_state is not None
+            and game_state.victory_mode == 'economic')
+        development_rate = 0.02
+        if economic_mode:
+            construction = self.faction.tech_tree.get('construction', 1)
+            trade_partners = sum(
+                'trade' in treaties
+                for treaties in self.faction.treaties.values())
+            development_rate = (
+                0.01
+                + min(0.02, max(0, construction - 1) * 0.002)
+                + min(0.01, trade_partners * 0.002))
+        growth_factor = (1.0 + development_rate) ** step_scale
         max_dev, max_pop = self._compute_caps()
 
         if self.developement < max_dev:
             self.developement = min(max_dev,
                                     self.developement * growth_factor)
         if self.population < max_pop:
-            self.population = min(max_pop, self.population * growth_factor)
+            if (self.faction is not None and game_state is not None
+                    and game_state.victory_mode == 'expansion'):
+                growth_rate = 0.005 + max(
+                    0, self.faction.tech_tree.get('biotech', 1) - 1) * 0.004
+            else:
+                growth_rate = 0.02
+            if self.faction is not None:
+                growth_rate *= self.faction.population_growth_multiplier
+            population_growth = (1.0 + growth_rate) ** step_scale
+            self.population = min(
+                max_pop, self.population * population_growth)
 
         # Libera construção assim que a colônia cresce um pouco
         if self.developement > 0.3:
@@ -166,13 +196,41 @@ class Planet:
     def produce(self, step_scale: float = 1.0):
         if self.faction is None:
             return
-        prod = self.production * self.developement * step_scale
+        prod = (
+            self.production * self.developement * step_scale
+            * self.faction.economy_multiplier)
+        game_state = getattr(self.faction, 'game_state', None)
+        economic_mode = (
+            game_state is not None
+            and game_state.victory_mode == 'economic')
+        manufacturing_efficiency = 1.0
+        if economic_mode:
+            construction = self.faction.tech_tree.get('construction', 1)
+            manufacturing_efficiency += min(
+                0.45, max(0, construction - 1) * 0.05)
         for resource in list(self.planet_resources.keys()):
             if resource == 'Research':
                 self.faction.add_research_income(prod)
                 continue
+            if resource == 'Credits':
+                continue
 
             cap = self.storage_capacity.get(resource, 0)
+            if economic_mode and resource in ECONOMIC_RECIPES:
+                recipe = ECONOMIC_RECIPES[resource]
+                output = min(
+                    prod * manufacturing_efficiency,
+                    max(0.0, cap - self.planet_resources[resource]))
+                for ingredient, units_per_output in recipe.items():
+                    output = min(
+                        output,
+                        self.planet_resources.get(ingredient, 0.0)
+                        / units_per_output)
+                for ingredient, units_per_output in recipe.items():
+                    self.planet_resources[ingredient] -= (
+                        output * units_per_output)
+                self.planet_resources[resource] += output
+                continue
 
             if resource == 'Food':
                 # Produção primeiro (limitada ao cap)

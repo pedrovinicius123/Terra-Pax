@@ -6,8 +6,14 @@ from players.factions import Faction, FactionType
 from game_state import GameState
 from controllers.player import PlayerController
 from controllers.ai import AIController
-from ui.galaxy_selection import GalaxySelectionScreen
-from ui.faction_selection import FactionSelectionScreen
+from ui.galaxy_selection import (
+    GalaxySelectionScreen,
+    VictorySelectionScreen,
+)
+from ui.faction_selection import (
+    FactionCustomizationScreen,
+    FactionSelectionScreen,
+)
 from ui.interface import GameUI
 
 
@@ -50,6 +56,26 @@ FACTION_DEFS = [
      "Exploradores de mundos extremos"),
 ]
 COMPACT_GALAXY_FACTION_INDICES = (0, 1, 2, 4, 5, 7)
+TINY_GALAXY_FACTION_INDICES = (0, 1, 2, 4)
+FACTION_TRAIT_ASSIGNMENTS = (
+    ("diplomacy", "military"),
+    ("military", "economy"),
+    ("science", "expansion"),
+    ("economy", "military"),
+    ("expansion", "diplomacy"),
+    ("expansion", "science"),
+    ("science", "economy"),
+    ("diplomacy", "expansion"),
+    ("economy", "science"),
+    ("military", "diplomacy"),
+)
+GALAXY_LAYOUTS = {
+    "tiny": (20, 1800, 260, TINY_GALAXY_FACTION_INDICES),
+    "compact": (30, 2600, 320, COMPACT_GALAXY_FACTION_INDICES),
+    "medium": (60, 4000, 440, None),
+    "large": (100, 5200, 500, None),
+    "giant": (160, 7000, 560, None),
+}
 
 
 def main():
@@ -59,143 +85,143 @@ def main():
     pygame.display.set_caption("Terra Pax")
     clock = pygame.time.Clock()
 
-    galaxy_selection = GalaxySelectionScreen(screen)
-    galaxy_size = None
-    selecting_galaxy = True
-    while selecting_galaxy:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                selecting_galaxy = False
-                break
-            if event.type == pygame.VIDEORESIZE:
-                W, H = event.w, event.h
-                screen = pygame.display.set_mode((W, H), pygame.RESIZABLE)
-                galaxy_selection.on_resize(screen)
-                continue
-            selected_size = galaxy_selection.handle_event(event)
-            if selected_size is not None:
-                galaxy_size = selected_size
-                selecting_galaxy = False
-                break
-        if selecting_galaxy:
-            galaxy_selection.draw()
-            pygame.display.flip()
-            clock.tick(60)
-
-    if galaxy_size is None:
-        pygame.quit()
-        return
-
-    if galaxy_size == "compact":
-        game_map, stars = init_map(30, 2600, 320)
-        faction_defs = [
-            FACTION_DEFS[index]
-            for index in COMPACT_GALAXY_FACTION_INDICES
-        ]
-    else:
-        game_map, stars = init_map(60, 4000, 440)
-        faction_defs = FACTION_DEFS
-
-    factions = []
-    used_names = set()
-    for name, ftype, is_human, color, _agg, desc in faction_defs:
-        sp = pick_home_planet(stars, ftype, used_names)
-        
-        if not sp:
-            print(f"Sem planetas livres para {name}; pulando.")
-            continue
-        star, planet = sp
-        used_names.add(planet.name)
-        factions.append(Faction(name, ftype,
-                                home_planet=planet, home_star=star,
-                                is_human=is_human,
-                                color=color, description=desc))
-
-    if not factions:
-        print("Nenhuma facção criada.")
-        pygame.quit()
-        return
-
-    for f in factions:
-        f.initialize_scout_manager(game_map, stars)
-
-    selection_screen = FactionSelectionScreen(screen, factions)
-    player_faction = None
-    selecting_faction = True
-    while selecting_faction:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                selecting_faction = False
-                break
-            if event.type == pygame.VIDEORESIZE:
-                W, H = event.w, event.h
-                screen = pygame.display.set_mode((W, H), pygame.RESIZABLE)
-                selection_screen.on_resize(screen)
-                continue
-            chosen = selection_screen.handle_event(event)
-            if chosen is not None:
-                player_faction = chosen
-                selecting_faction = False
-                break
-        if selecting_faction:
-            selection_screen.draw()
-            pygame.display.flip()
-            clock.tick(60)
-
-    if player_faction is None:
-        pygame.quit()
-        return
-
-    player_ctrl = PlayerController(player_faction)
-    agg_map = {d[0]: d[4] for d in faction_defs}
-    for f in factions:
-        f.is_human = f is player_faction
-        if f is player_faction:
-            f.controller = player_ctrl
-        else:
-            base = agg_map.get(f.name, 0.4)
-            agg = max(0.1, min(0.95, base + random.uniform(-0.1, 0.1)))
-            f.controller = AIController(f, aggression=agg)
-
-    for f in factions:
-        f.spawn_ship('scout')
-
-    state = GameState(game_map, stars, factions, tick_interval=0.5)
-    state.start()
-    state.log_event(f"{len(factions)} facções emergiram na galáxia")
-
-    ui = GameUI(screen, state, player_ctrl)
-    ui.log_msg(f"Bem-vindo a Terra Pax — {len(factions)} faccoes")
-
-    is_fullscreen = False
-    running = True
-    try:
-        while running:
+    def select_value(selection):
+        nonlocal W, H, screen
+        while True:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    running = False
-                elif (event.type == pygame.KEYDOWN
-                      and event.key == pygame.K_F11):
-                    is_fullscreen = not is_fullscreen
-                    screen = pygame.display.set_mode(
-                        (0, 0) if is_fullscreen else (W, H),
-                        pygame.FULLSCREEN if is_fullscreen
-                        else pygame.RESIZABLE)
-                    ui.on_resize(screen)
-                elif (event.type == pygame.VIDEORESIZE
-                      and not is_fullscreen):
+                    return None
+                if event.type == pygame.VIDEORESIZE:
                     W, H = event.w, event.h
-                    screen = pygame.display.set_mode((W, H),
-                                                     pygame.RESIZABLE)
-                    ui.on_resize(screen)
-                else:
-                    ui.handle_event(event)
-            ui.render()
+                    screen = pygame.display.set_mode(
+                        (W, H), pygame.RESIZABLE)
+                    selection.on_resize(screen)
+                    continue
+                choice = selection.handle_event(event)
+                if choice is not None:
+                    return choice
+            selection.draw()
             pygame.display.flip()
             clock.tick(60)
-    finally:
-        state.stop()
-        pygame.quit()
+
+    while True:
+        galaxy_size = select_value(GalaxySelectionScreen(screen))
+        if galaxy_size is None:
+            break
+        victory_mode = select_value(VictorySelectionScreen(screen))
+        if victory_mode is None:
+            break
+
+        n_stars, sector_size, min_dist, faction_indices = (
+            GALAXY_LAYOUTS[galaxy_size])
+        game_map, stars = init_map(n_stars, sector_size, min_dist)
+        faction_defs = (
+            [FACTION_DEFS[index] for index in faction_indices]
+            if faction_indices is not None else FACTION_DEFS)
+
+        factions = []
+        aggression_by_faction = {}
+        used_names = set()
+        for name, ftype, is_human, color, aggression, desc in faction_defs:
+            home = pick_home_planet(stars, ftype, used_names)
+            if not home:
+                print(f"Sem planetas livres para {name}; pulando.")
+                continue
+            star, planet = home
+            used_names.add(planet.name)
+            faction_index = next(
+                index for index, definition in enumerate(FACTION_DEFS)
+                if definition[0] == name)
+            advantage, disadvantage = FACTION_TRAIT_ASSIGNMENTS[faction_index]
+            faction = Faction(
+                name, ftype, home_planet=planet, home_star=star,
+                is_human=is_human, color=color, description=desc,
+                advantage=advantage, disadvantage=disadvantage)
+            factions.append(faction)
+            aggression_by_faction[id(faction)] = aggression
+
+        if not factions:
+            print("Nenhuma facção criada.")
+            break
+
+        player_faction = select_value(
+            FactionSelectionScreen(screen, factions))
+        if player_faction is None:
+            break
+        player_faction = select_value(
+            FactionCustomizationScreen(
+                screen, player_faction,
+                (faction.name for faction in factions
+                 if faction is not player_faction)))
+        if player_faction is None:
+            break
+
+        for faction in factions:
+            faction.initialize_scout_manager(game_map, stars)
+
+        player_ctrl = PlayerController(player_faction)
+        for faction in factions:
+            faction.is_human = faction is player_faction
+            if faction is player_faction:
+                faction.controller = player_ctrl
+            else:
+                base = aggression_by_faction[id(faction)]
+                aggression = max(
+                    0.1, min(0.95, base + random.uniform(-0.1, 0.1)))
+                faction.controller = AIController(
+                    faction, aggression=aggression)
+
+        for faction in factions:
+            faction.spawn_ship('scout')
+
+        state = GameState(
+            game_map, stars, factions, tick_interval=0.5,
+            victory_mode=victory_mode)
+        state.start()
+        state.log_event(
+            f"{len(factions)} facções emergiram na galáxia "
+            f"({GameState.VICTORY_MODES[victory_mode]})")
+
+        ui = GameUI(screen, state, player_ctrl)
+        ui.log_msg(f"Bem-vindo a Terra Pax — {len(factions)} facções")
+
+        is_fullscreen = False
+        running = True
+        try:
+            while running and not ui.restart_requested:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
+                    elif (event.type == pygame.KEYDOWN
+                          and event.key == pygame.K_F11):
+                        is_fullscreen = not is_fullscreen
+                        screen = pygame.display.set_mode(
+                            (0, 0) if is_fullscreen else (W, H),
+                            pygame.FULLSCREEN if is_fullscreen
+                            else pygame.RESIZABLE)
+                        ui.on_resize(screen)
+                    elif (event.type == pygame.VIDEORESIZE
+                          and not is_fullscreen):
+                        W, H = event.w, event.h
+                        screen = pygame.display.set_mode(
+                            (W, H), pygame.RESIZABLE)
+                        ui.on_resize(screen)
+                    else:
+                        ui.handle_event(event)
+                ui.render()
+                pygame.display.flip()
+                clock.tick(60)
+        finally:
+            state.stop()
+            for faction in factions:
+                faction.stop_faction()
+            if ui.restart_requested and is_fullscreen:
+                screen = pygame.display.set_mode((W, H), pygame.RESIZABLE)
+
+        if not ui.restart_requested:
+            break
+
+    pygame.quit()
 
 
 if __name__ == "__main__":

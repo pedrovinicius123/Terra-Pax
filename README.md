@@ -29,14 +29,12 @@ diretamente a versão Python durante desenvolvimento, use `python main.py`.
 
 ## Tempo e calendário
 
-A partida começa no ano **2150**. Cada segundo de tempo simulado avança o
-calendário em um ano: o primeiro segundo completo termina em 2151. O ano
-aparece em destaque na barra superior. Pausar interrompe o avanço; as opções
-de velocidade fazem o calendário correr mais rápido (por exemplo, em 2x,
-dois anos simulados passam por segundo real).
+A partida começa em **janeiro de 2150**. Cada segundo real avança um mês
+simulado; em 2x, dois meses passam por segundo. O mês e o ano aparecem na
+barra superior. Pausar interrompe o calendário.
 
-Os tempos de construção e as taxas de pesquisa também usam o tempo simulado,
-portanto seus valores na interface são apresentados em anos e por ano.
+Os tempos de construção usam meses simulados, e as taxas de pesquisa são
+apresentadas por ano.
 
 ## Planetas gerados proceduralmente
 
@@ -64,27 +62,36 @@ as luzes aparecem no lado noturno e as nuvens no diurno. Os atlas de nuvens e
 estrelas continuam sendo carregados localmente, sem downloads durante a
 partida.
 
-A galáxia começa com dez facções controladas por IA ou pelo jogador, com
-representantes dos quatro tipos de suitability (**Human**, **Alien**,
-**Hybrid** e **Robot**).
+A cada partida, escolha uma galáxia minúscula (20 sistemas), pequena (30),
+média (60), grande (100) ou gigante (160), além de uma condição de vitória.
+As facções incluem representantes dos quatro tipos de suitability (**Human**,
+**Alien**, **Hybrid** e **Robot**). Escolha uma facção e personalize seu nome,
+uma vantagem e uma desvantagem; as demais recebem controladores de IA.
 
-Ao iniciar, escolha uma galáxia padrão com 60 sistemas e 10 facções ou uma
-galáxia compacta com 30 sistemas e 6 facções. A opção compacta também inclui
-os quatro tipos de suitability.
+As condições de vitória são: alianças com todas as facções ainda ativas
+(Diplomática), conquistar os impérios rivais (Dominação), superar em duas vezes
+a economia combinada dos adversários (Econômica), liderar em população no ano
+3000 (Expansão), completar todos os campos de pesquisa até o nível 10
+(Científica) ou liderar em força total no ano 3000 (Padrão). A pesquisa
+científica exige mais investimento; na expansão, Biotech acelera o crescimento
+populacional.
 
-Antes de cada partida, escolha qualquer uma das facções para comandar. As
-demais recebem controladores de IA.
+Maravilhas galácticas únicas oferecem grandes bônus para cada condição de
+vitória, inclusive força total no modo Padrão. Construa-as na aba
+**Construir**; acordos comerciais também geram créditos, especialmente na
+vitória econômica. Nesse modo, eletrônicos, químicos e ligas exigem insumos
+industriais; a tecnologia de Construção aumenta sua eficiência.
 
-Os sistemas estelares são distribuídos por uma galáxia de 4000 unidades, com
-espaçamento mínimo proporcional à escala da galáxia e inverso à raiz da
-quantidade de estrelas. O alcance colonial inicial é de 600 unidades e aumenta
-em 100 a cada nível de FTL acima do primeiro. As estrelas, planetas e órbitas
-foram reduzidos para manter os astros pequenos em relação às distâncias entre
-sistemas.
+Na galáxia média, os sistemas são distribuídos por um setor de 4000 unidades;
+as demais opções ajustam o setor e o espaçamento à quantidade de estrelas. O
+alcance colonial inicial é de 600 unidades e aumenta em 100 a cada nível de
+FTL acima do primeiro. As estrelas, planetas e órbitas foram reduzidos para
+manter os astros pequenos em relação às distâncias entre sistemas.
 
 Colônias recebem luzes urbanas procedurais em cidades geradas sobre continentes
-habitáveis. O brilho cresce conforme população e desenvolvimento, tanto no
-mapa quanto no visualizador 3D.
+habitáveis. Os assentamentos favorecem regiões costeiras, planas e temperadas;
+o brilho acompanha população e desenvolvimento, tanto no mapa quanto no
+visualizador 3D.
 
 ## Interface e controles
 
@@ -108,11 +115,14 @@ mapa quanto no visualizador 3D.
   facção e a lista pode ser rolada.
 - Em **Diplom.**, melhore relações por 25 de Energia (+10, até 100), proponha
   pactos de não agressão (relação 45) e acordos comerciais (relação 55), ou
-  declare guerra. Alianças exigem acordo comercial e relação 70; acordos
+  declare guerra. Alianças exigem acordo comercial e relação 70 (85 no modo
+  Diplomático); acordos
   comerciais aumentam a pesquisa em 5% por parceiro, até 50%. Durante uma
   guerra, uma facção de IA pode propor paz; aceite ou recuse a proposta na
   seção de diplomacia. Uma recusa vale até o fim daquela guerra.
 - `Espaço` pausa ou retoma a simulação; `F11` alterna tela cheia.
+- **Novo jogo** reinicia a partida e permite escolher novamente galáxia,
+  condição de vitória e facção.
 - Os botões no topo controlam pausa e velocidade. Os filtros do mapa alternam
   entre todos os planetas, os da sua facção e os ainda livres.
 - As abas laterais reúnem recursos, sistemas, pesquisa, frota, construção e

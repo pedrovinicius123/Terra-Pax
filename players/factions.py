@@ -12,9 +12,56 @@ BASE_COLONIZATION_RANGE = 600.0
 COLONIZATION_RANGE_PER_FTL_LEVEL = 100.0
 
 TECH_CAPS = {
-    'ftl': 100, 'exploration': 100, 'propulsion': 100,
-    'weapons': 100, 'shields': 100, 'sensors': 100,
-    'construction': 100,
+    'ftl': 10, 'exploration': 10, 'propulsion': 10,
+    'weapons': 10, 'shields': 10, 'sensors': 10,
+    'construction': 10, 'biotech': 10,
+}
+
+FACTION_TRAITS = {
+    'diplomacy': ('Diplomacia', 'Relações diplomáticas +20%'),
+    'economy': ('Economia', 'Produção e renda comercial +20%'),
+    'expansion': ('Expansão', 'Crescimento populacional +20%'),
+    'military': ('Militar', 'Força de combate +20%'),
+    'science': ('Ciência', 'Pesquisa +20%'),
+}
+
+GALACTIC_WONDERS = {
+    'diplomatic': {
+        'name': 'Assembleia das Estrelas',
+        'description': 'Melhora relações diplomáticas continuamente.',
+        'cost': {'Minerals': 1200, 'Energy': 900, 'Electronics': 300,
+                 'Alloys': 250, 'Credits': 100},
+    },
+    'domination': {
+        'name': 'Forja de Guerra Galáctica',
+        'description': 'Aumenta em 35% a força de combate.',
+        'cost': {'Minerals': 1800, 'Energy': 700, 'Electronics': 250,
+                 'Alloys': 500, 'Credits': 100},
+    },
+    'economic': {
+        'name': 'Mercado da Via Láctea',
+        'description': 'Aumenta em 50% a pontuação econômica.',
+        'cost': {'Minerals': 1000, 'Energy': 1000, 'Electronics': 400,
+                 'Alloys': 250, 'Credits': 150},
+    },
+    'expansion': {
+        'name': 'Berço de Novos Mundos',
+        'description': 'Aumenta em 35% o crescimento populacional.',
+        'cost': {'Minerals': 1500, 'Energy': 800, 'Electronics': 250,
+                 'Alloys': 300, 'Credits': 100},
+    },
+    'scientific': {
+        'name': 'Arquivo do Conhecimento',
+        'description': 'Aumenta em 50% a pesquisa.',
+        'cost': {'Minerals': 1000, 'Energy': 1200, 'Electronics': 500,
+                 'Alloys': 200, 'Credits': 100},
+    },
+    'standard': {
+        'name': 'Monumento do Triunfo',
+        'description': 'Aumenta em 25% a força total da facção.',
+        'cost': {'Minerals': 1500, 'Energy': 1000, 'Electronics': 350,
+                 'Alloys': 400, 'Credits': 125},
+    },
 }
 
 class FactionType(Enum):
@@ -118,7 +165,14 @@ DESIGNS = {
 class Faction:
     def __init__(self, name, faction_type, home_planet, home_star,
              starting_resources=None, is_human=False,
-             color=None, description=""):
+             color=None, description="", advantage="science",
+             disadvantage="military"):
+        if advantage not in FACTION_TRAITS:
+            raise ValueError(f"Vantagem de facção inválida: {advantage}")
+        if disadvantage not in FACTION_TRAITS:
+            raise ValueError(f"Desvantagem de facção inválida: {disadvantage}")
+        if advantage == disadvantage:
+            raise ValueError("Vantagem e desvantagem devem ser diferentes")
         
         self.name = name
         self.faction_type = faction_type
@@ -126,6 +180,8 @@ class Faction:
         self.home_planet = home_planet
         self.color = color or self._generate_faction_color()
         self.description = description
+        self.advantage = advantage
+        self.disadvantage = disadvantage
         self.is_human = is_human
         self.lock = threading.RLock()
 
@@ -144,7 +200,7 @@ class Faction:
 
         start = {'Minerals': 500, 'Food': 200, 'Energy': 300,
                  'Electronics': 100, 'Chemicals': 100, 'Alloys': 50,
-                 'Research': 0.0}
+                 'Credits': 100, 'Research': 0.0}
         if starting_resources:
             start.update(starting_resources)
 
@@ -171,7 +227,7 @@ class Faction:
 
         self.tech_tree = {'ftl': 1, 'exploration': 1, 'propulsion': 1,
                           'weapons': 1, 'shields': 1, 'sensors': 1,
-                          'construction': 1}
+                          'construction': 1, 'biotech': 1}
         
         self.research_weights = {k: 1.0 for k in self.tech_tree}
         self.research_progress = {k: 0.0 for k in self.tech_tree}
@@ -183,6 +239,7 @@ class Faction:
         self.treaties = {}
         self.war_declarations = set()
         self.allies = set()
+        self.wonders = set()
         self.pending_peace_offers = set()
         self.declined_peace_offers = set()
 
@@ -213,6 +270,33 @@ class Faction:
         return palette[idx]
 
     # ---------- Recursos ----------
+    def trait_multiplier(self, trait):
+        if self.advantage == trait:
+            return 1.2
+        if self.disadvantage == trait:
+            return 0.8
+        return 1.0
+
+    @property
+    def economy_multiplier(self):
+        wonder_bonus = 1.5 if 'economic' in self.wonders else 1.0
+        return self.trait_multiplier('economy') * wonder_bonus
+
+    @property
+    def research_multiplier(self):
+        wonder_bonus = 1.5 if 'scientific' in self.wonders else 1.0
+        return self.trait_multiplier('science') * wonder_bonus
+
+    @property
+    def combat_multiplier(self):
+        wonder_bonus = 1.35 if 'domination' in self.wonders else 1.0
+        return self.trait_multiplier('military') * wonder_bonus
+
+    @property
+    def population_growth_multiplier(self):
+        wonder_bonus = 1.35 if 'expansion' in self.wonders else 1.0
+        return self.trait_multiplier('expansion') * wonder_bonus
+
     def _recompute_resources(self):
         totals = {}
         for p in self.colonies.values():
@@ -382,7 +466,12 @@ class Faction:
     # ---------- Pesquisa ----------
     def add_research_income(self, amount: float):
         """Chamado por Planet.produce(). Acumula no pool."""
-        self.research_income_pool += amount * RESEARCH_SCALE
+        trade_partners = sum(
+            'trade' in treaties for treaties in self.treaties.values())
+        trade_multiplier = 1.0 + min(0.5, trade_partners * 0.05)
+        self.research_income_pool += (
+            amount * RESEARCH_SCALE * self.research_multiplier
+            * trade_multiplier)
 
     def process_research(self, dt=1.0):
         pool = self.research_income_pool
@@ -443,7 +532,8 @@ class Faction:
         per_tick = sum(p.production * p.developement
                        for p in self.colonies.values()
                        if p.is_colonized and p.faction is self)
-        per_tick *= RESEARCH_SCALE
+        per_tick *= RESEARCH_SCALE * self.economy_multiplier
+        per_tick *= self.research_multiplier
         trade_partners = sum(
             'trade' in treaties for treaties in self.treaties.values())
         per_tick *= 1.0 + min(0.5, trade_partners * 0.05)
@@ -452,10 +542,14 @@ class Faction:
     def get_research_cost(self, tech_field):
         base = {'exploration': 100, 'propulsion': 120, 'weapons': 150,
                 'shields': 140, 'sensors': 110, 'construction': 130,
-                'ftl': 140}
+                'ftl': 140, 'biotech': 125}
         level = self.tech_tree.get(tech_field, 1)
         # Curva geométrica: 100, 170, 289, 491, ... 11859 (Lv10)
-        return base.get(tech_field, 100) * math.pow(1.7, level - 1)
+        cost = base.get(tech_field, 100) * math.pow(1.7, level - 1)
+        if (self.game_state is not None
+                and self.game_state.victory_mode == 'scientific'):
+            cost *= 2.5
+        return cost
 
     def is_tech_capped(self, field):
         return self.tech_tree.get(field, 1) >= TECH_CAPS.get(field, 10)
@@ -473,7 +567,7 @@ class Faction:
         planet.planet_resources = {
             'Minerals': 100, 'Food': 200, 'Energy': 100,
             'Electronics': 20, 'Chemicals': 20, 'Alloys': 10,
-            'Research': 0.0}
+            'Credits': 0.0, 'Research': 0.0}
         self.colonies[planet.name] = planet
         self.controlled_stars[star.name] = star
         self.stats['colonies_established'] += 1
@@ -572,6 +666,9 @@ class Faction:
         return self.relations.get(other.name, 50)
 
     def adjust_relation(self, other, amount):
+        amount *= self.trait_multiplier('diplomacy')
+        if 'diplomatic' in self.wonders:
+            amount *= 1.25
         relation = max(0, min(100, self.get_relation(other) + amount))
         self.relations[other.name] = relation
         other.relations[self.name] = relation
@@ -679,13 +776,56 @@ class Faction:
                 continue
             w = getattr(s, 'weapons', 0)
             if w > 0:
-                mil += w * (s.hull / 100.0) * (1.0 + s.max_shields / 100.0)
+                mil += (w * (s.hull / 100.0)
+                        * (1.0 + s.max_shields / 100.0)
+                        * self.combat_multiplier)
         defs = sum(p.defense for p in self.colonies.values() if p.is_colonized)
         econ = sum(p.production * p.developement
                    for p in self.colonies.values() if p.is_colonized) * 10.0
+        econ *= self.economy_multiplier
         tech = sum(self.tech_tree.values()) * 5.0
+        total = mil + defs + econ + tech
+        if 'standard' in self.wonders:
+            total *= 1.25
         return {'military': mil, 'defense': defs, 'economy': econ,
-                'tech': tech, 'total': mil + defs + econ + tech}
+                'tech': tech, 'total': total}
+
+    def economy_score(self):
+        production = sum(
+            planet.production * planet.developement
+            for planet in self.colonies.values() if planet.is_colonized)
+        stockpiles = sum(
+            amount * (2.0 if resource == 'Credits' else 0.5)
+            for resource, amount in self.resources.items()
+            if resource != 'Research')
+        trade_partners = sum(
+            'trade' in treaties for treaties in self.treaties.values())
+        trade_bonus = 1.0 + min(1.0, trade_partners * 0.2)
+        return (
+            production * 100.0 + stockpiles
+        ) * trade_bonus * self.economy_multiplier
+
+    def build_wonder(self, wonder_type):
+        if wonder_type not in GALACTIC_WONDERS:
+            return False
+        state = self.game_state
+        if state is None:
+            return False
+        with state.lock:
+            if (self.eliminated or wonder_type in self.wonders
+                    or wonder_type in state.wonders_built):
+                return False
+            cost = GALACTIC_WONDERS[wonder_type]['cost']
+            if not self.can_afford(cost):
+                return False
+            if not self.pay_cost(cost):
+                return False
+            self.wonders.add(wonder_type)
+            state.wonders_built[wonder_type] = self.name
+            self._recompute_resources()
+            state.log_event(
+                f"{self.name} construiu {GALACTIC_WONDERS[wonder_type]['name']}")
+            return True
 
     def propose_alliance(self, other) -> bool:
         if other is self or other.eliminated:
@@ -695,7 +835,10 @@ class Faction:
             return False
         if status == DiplomacyStatus.ALLY:
             return True
-        if (self.get_relation(other) < 70
+        minimum_relation = 85 if (
+            self.game_state is not None
+            and self.game_state.victory_mode == 'diplomatic') else 70
+        if (self.get_relation(other) < minimum_relation
                 or not self.has_treaty(other, 'trade')):
             return False
         self.update_diplomacy(other, DiplomacyStatus.ALLY)
@@ -714,6 +857,9 @@ class Faction:
         return {'name': self.name,
                 'faction_type': self.faction_type.value,
                 'description': self.description,
+                'advantage': self.advantage,
+                'disadvantage': self.disadvantage,
+                'wonders': sorted(self.wonders),
                 'resources': dict(self.resources),
                 'tech_levels': dict(self.tech_tree),
                 'research_weights': dict(self.research_weights),

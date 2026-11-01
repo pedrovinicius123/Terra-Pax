@@ -21,6 +21,7 @@ class AIController(BaseController):
         self.timer = 0.0
         with state.lock:
             self._manage_research(state)
+            self._manage_wonders(state)
             self._manage_scouts(state)
             self.faction.auto_terraform_step()
             self.faction.auto_expand_step(state)
@@ -34,7 +35,7 @@ class AIController(BaseController):
         base_priority = {
             'exploration': 10, 'propulsion': 9, 'ftl': 9,
             'sensors': 7, 'construction': 6, 'shields': 5,
-            'weapons': 4 + aggression_bonus,
+            'weapons': 4 + aggression_bonus, 'biotech': 6,
         }
         priorities = {}
         for field in f.tech_tree:
@@ -48,6 +49,18 @@ class AIController(BaseController):
         min_p = min(priorities.values())
         for field, p in priorities.items():
             f.research_weights[field] = max(0.5, p - min_p + 1.0)
+
+    def _manage_wonders(self, state):
+        wonder = {
+            'diplomatic': 'diplomatic',
+            'domination': 'domination',
+            'economic': 'economic',
+            'expansion': 'expansion',
+            'scientific': 'scientific',
+            'standard': 'standard',
+        }.get(state.victory_mode)
+        if wonder is not None and wonder not in state.wonders_built:
+            self.faction.build_wonder(wonder)
 
     def _manage_scouts(self, state):
         f = self.faction
@@ -103,13 +116,18 @@ class AIController(BaseController):
                 if f.propose_alliance(other):
                     continue
 
-            if self.aggression < 0.7 and relation < 70:
-                relation = f.adjust_relation(other, 1)
+            alliance_threshold = (
+                85 if state.victory_mode == 'diplomatic' else 70)
+            if (self.aggression < 0.7
+                    or state.victory_mode == 'diplomatic'):
+                if relation < alliance_threshold:
+                    relation = f.adjust_relation(other, 1)
             if relation >= 45:
                 f.offer_treaty(other, 'non_aggression')
             if relation >= 55:
                 f.offer_treaty(other, 'trade')
-            if relation >= 70 and f.has_treaty(other, 'trade'):
+            if (relation >= alliance_threshold
+                    and f.has_treaty(other, 'trade')):
                 f.propose_alliance(other)
 
             # Declarar guerra com vantagem esmagadora
