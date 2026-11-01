@@ -3,6 +3,7 @@ import random
 import math
 
 from graphics.star import Planet, Star
+from graphics.planet_generator import generate_suitability_profile
 
 
 def generate_traditional_star_name():
@@ -46,9 +47,9 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
     for _ in range(n_stars):
         pos = [random.uniform(0, sector_size), random.uniform(0, sector_size)]
 
-        # Realista: estrela ~10x o raio de um planeta; sistema compacto.
-        star_r = random.uniform(0.007, 0.011) * sector_size   # 10.5–16.5 u
-        planet_r = random.uniform(0.0015, 0.0030) * sector_size  # 2.25–4.5 u
+        # Mantém os corpos celestes pequenos em relação à escala da galáxia.
+        star_r = random.uniform(0.0028, 0.0042) * sector_size
+        planet_r = random.uniform(0.00045, 0.0008) * sector_size
 
         star = Star(
             name=generate_traditional_star_name(),
@@ -77,16 +78,12 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
                 name=f"{star.name}-{planet_letters[k]}",
                 abs_position=(px, py),
                 planet_resources={},
-                life_suitability={
-                    'Human': random.uniform(0.10, 1.0),
-                    'Alien': random.uniform(0.10, 1.0),
-                    'Robot': random.uniform(0.10, 1.0),
-                    'Hybrid': random.uniform(0.10, 1.0),
-                },
+                life_suitability=generate_suitability_profile(),
                 production=1.0,
                 distance_from_star=dist,
                 is_colonized=False,
                 radius=planet_r,
+                star_position=star.position
             )
             p.post_init()
             p.parent_star = star

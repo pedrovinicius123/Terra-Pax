@@ -6,7 +6,7 @@ import numpy as np
 import networkx as nx
 
 
-TRAVEL_SCALE = 6.0  # segundos_de_jogo = dist / (speed * TRAVEL_SCALE)
+TRAVEL_SCALE = 6.0  # anos_de_jogo = dist / (speed * TRAVEL_SCALE)
 
 
 class Ship(threading.Thread):

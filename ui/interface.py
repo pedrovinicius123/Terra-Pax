@@ -4,30 +4,34 @@ import pygame
 
 from players.factions import DESIGNS, DiplomacyStatus
 from players.ships import ColonyShip
+from graphics.planet_generator import (
+    dominant_suitability,
+    generate_planet_surface,
+)
 
 
 class C:
-    BG          = (10, 10, 20)
-    GRID        = (28, 28, 46)
-    STAR        = (255, 220, 110)
-    STAR_BORDER = (255, 240, 180)
-    PLANET_FREE_GOOD = (110, 230, 130)
-    PLANET_FREE_MID  = (230, 200, 80)
-    PLANET_FREE_LOW  = (200, 90, 80)
-    PLANET_MINE      = (110, 210, 130)
-    PLANET_ENEMY     = (200, 90, 90)
-    SELECTED    = (255, 255, 100)
-    PANEL_BG    = (20, 20, 34)
-    PANEL_BR    = (70, 70, 110)
-    TEXT        = (230, 230, 240)
-    DIM         = (150, 150, 175)
-    ACCENT      = (110, 160, 255)
-    BUTTON      = (55, 65, 100)
-    BUTTON_HOV  = (85, 105, 160)
-    BUTTON_DIS  = (32, 32, 44)
-    TAB_ACTIVE  = (90, 120, 180)
+    BG          = (7, 12, 25)
+    GRID        = (22, 36, 57)
+    STAR        = (255, 207, 117)
+    STAR_BORDER = (255, 239, 190)
+    PLANET_FREE_GOOD = (82, 220, 177)
+    PLANET_FREE_MID  = (236, 190, 103)
+    PLANET_FREE_LOW  = (226, 112, 121)
+    PLANET_MINE      = (82, 220, 177)
+    PLANET_ENEMY     = (226, 112, 121)
+    SELECTED    = (124, 224, 255)
+    PANEL_BG    = (13, 23, 41)
+    PANEL_BR    = (40, 67, 93)
+    TEXT        = (224, 237, 247)
+    DIM         = (136, 160, 181)
+    ACCENT      = (89, 201, 219)
+    BUTTON      = (26, 48, 72)
+    BUTTON_HOV  = (41, 79, 107)
+    BUTTON_DIS  = (25, 33, 45)
+    TAB_ACTIVE  = (37, 104, 128)
     INFLUENCE   = (35, 55, 90)
-    SIEGE       = (255, 60, 60)
+    SIEGE       = (255, 91, 104)
 
     RES = {
         'Minerals':    (150, 150, 100),
@@ -84,7 +88,7 @@ class _FakeLabel:
 class GameUI:
     PANEL_W = 420
     TOP_H   = 36
-    BOT_H   = 130
+    BOT_H   = 144
 
     def __init__(self, screen, state, player_ctrl):
         self.screen = screen
@@ -118,6 +122,8 @@ class GameUI:
         self.f_title = pygame.font.SysFont('Consolas', 18, bold=True)
 
         self.log = []
+        self._planet_surfaces = {}
+        self._map_planet_surfaces = {}
         self._last_event_idx = 0
         self._top_buttons = []
         self._filter_buttons = []
@@ -144,9 +150,15 @@ class GameUI:
         self.log = self.log[-7:]
 
     def _sync_events(self):
-        events = self.state.event_log
+        events = getattr(self.state, 'event_log', None)
+        if events is None:
+            return
         while self._last_event_idx < len(events):
-            _, msg = events[self._last_event_idx]
+            entry = events[self._last_event_idx]
+            if isinstance(entry, tuple) and len(entry) == 2:
+                _, msg = entry
+            else:
+                msg = str(entry)
             self.log_msg(msg)
             self._last_event_idx += 1
 
@@ -304,7 +316,7 @@ class GameUI:
             y = content_y + 22
             for key, d in DESIGNS.items():
                 btn = Button((x0, y, w, 22),
-                             f"{d['display']}  [{d['build_time']}s]",
+                             f"{d['display']}  [{d['build_time']} anos]",
                              lambda k=key: self._build(k),
                              enabled=lambda dd=d: f.can_afford(dd['cost']))
                 self._panel_buttons.append(btn)
@@ -346,10 +358,16 @@ class GameUI:
                         text = f"{p.name[-1]} —"
                         col = C.DIM
                 else:
-                    text = f"{p.name[-1]} livre suit {suit:.2f}"
+                    hs = p.life_suitability
+                    text = (f"{p.name[-1]} livre  "
+                            f"H{hs.get('Human',0):.2f} "
+                            f"A{hs.get('Alien',0):.2f} "
+                            f"R{hs.get('Robot',0):.2f} "
+                            f"Y{hs.get('Hybrid',0):.2f}")
                     col = (C.PLANET_FREE_GOOD if suit >= 0.7 else
-                           C.PLANET_FREE_MID if suit >= 0.4 else
-                           C.PLANET_FREE_LOW)
+                        C.PLANET_FREE_MID if suit >= 0.4 else
+                        C.PLANET_FREE_LOW)
+                    
                 self._panel_buttons.append(_FakeLabel(
                     (x0, y, w - 100, 20), text, self.f_small, color=col))
                 act = self._planet_action(p)
@@ -512,11 +530,13 @@ class GameUI:
                 self._toggle_pause()
             elif event.key == pygame.K_r:
                 self.zoom, self.off_x, self.off_y = 0.35, 0, 0
+                self._map_planet_surfaces.clear()
 
     def _zoom_at(self, pos, direction):
         wx, wy = self.screen_to_world(*pos)
         self.zoom = max(0.05, min(80.0,
                          self.zoom * (1.2 if direction > 0 else 1 / 1.2)))
+        self._map_planet_surfaces.clear()
         self.off_x = wx - (pos[0] - self.W / 2) / self.zoom
         self.off_y = wy - (pos[1] - self.H / 2) / self.zoom
 
@@ -543,12 +563,13 @@ class GameUI:
         self._action_buttons = []
         if not self.selected_star:
             return
-        x = 8
-        y = self.H - self.BOT_H + 82
+        x = 10
+        y = self.H - self.BOT_H + 104      # era +82 — agora abaixo da barra de defesa
         p = self.selected_planet
         f = self.faction
         if p is None:
             return
+
         if not p.is_colonized:
             if self.player.has_idle_colony_ship():
                 self._action_buttons.append(Button(
@@ -691,6 +712,12 @@ class GameUI:
             r = max(2, int(s.radius * self.zoom))
             if sx < -r or sx > self.W + r or sy < -r or sy > self.H + r:
                 continue
+            if s is self.selected_star:
+                for planet in s.planets:
+                    orbit_radius = int(planet.distance_from_star * self.zoom)
+                    if orbit_radius > r + 2:
+                        pygame.draw.circle(
+                            self.screen, C.GRID, (sx, sy), orbit_radius, 1)
             pygame.draw.circle(self.screen, C.STAR, (sx, sy), r)
             pygame.draw.circle(self.screen, C.STAR_BORDER, (sx, sy), r, 1)
             if s is self.selected_star:
@@ -702,8 +729,16 @@ class GameUI:
                 px, py = self.world_to_screen(*p.abs_position)
                 pr = max(1, int(p.radius * self.zoom))
                 if -pr <= px <= self.W + pr and -pr <= py <= self.H + pr:
-                    pygame.draw.circle(self.screen,
-                                       self._planet_color(p), (px, py), pr)
+                    if not p.is_colonized and pr >= 8:
+                        image = self._map_planet_surface(p, pr * 2)
+                        self.screen.blit(image, (px - pr, py - pr))
+                    else:
+                        pygame.draw.circle(
+                            self.screen, self._planet_color(p), (px, py), pr)
+                    if not p.is_colonized and pr >= 3:
+                        pygame.draw.circle(
+                            self.screen, self._planet_color(p), (px, py),
+                            pr, 1)
                     # Anel de cerco
                     if (p.is_colonized and p.max_defense > 0
                             and p.defense < p.max_defense - 0.5):
@@ -743,14 +778,31 @@ class GameUI:
         pygame.draw.rect(self.screen, C.PANEL_BG, (0, 0, self.W, self.TOP_H))
         pygame.draw.line(self.screen, C.PANEL_BR,
                          (0, self.TOP_H), (self.W, self.TOP_H))
-        
+
+        title = self.f_title.render("TERRA PAX", True, C.TEXT)
+        self.screen.blit(title, (10, 8))
+        year_rect = pygame.Rect(128, 5, 116, 26)
+        pygame.draw.rect(self.screen, (22, 47, 67), year_rect,
+                         border_radius=5)
+        pygame.draw.rect(self.screen, C.ACCENT, year_rect, 1,
+                         border_radius=5)
+        year_text = self.f_med.render(
+            f"ANO {self.state.year}", True, C.ACCENT)
+        self.screen.blit(year_text, year_text.get_rect(center=year_rect.center))
+
         war_n = len(self.faction.war_declarations)
         ally_n = len(self.faction.allies)
-        txt = (f"TERRA PAX  T={self.state.time:.0f}s  "
-               f"{self.faction.name}  {self.state.speed:.0f}x  "
-               f"frota {len(self.faction.ships)}  "
-               f"guerras {war_n}  aliados {ally_n}")
-        self.screen.blit(self.f_title.render(txt, True, C.TEXT), (10, 8))
+        status = self.f_small.render(
+            f"{self.faction.name}  |  frota {len(self.faction.ships)}  "
+            f"guerras {war_n}  aliados {ally_n}  |  {self.state.speed:g}x",
+            True, C.DIM,
+        )
+        status_right = self.W - self.PANEL_W - 250
+        if status_right > 258:
+            self.screen.set_clip(pygame.Rect(258, 0, status_right - 258,
+                                             self.TOP_H))
+            self.screen.blit(status, (258, 12))
+            self.screen.set_clip(None)
 
     def _draw_panel(self):
         x0 = self.W - self.PANEL_W
@@ -808,7 +860,7 @@ class GameUI:
             rate = f.compute_research_rate()
             total_w = sum(f.research_weights.values()) or 1.0
             self.screen.blit(self.f_med.render(
-                f"PESQUISA  {rate:5.1f}/s", True, C.ACCENT),
+                f"PESQUISA  {rate:5.1f}/ano", True, C.ACCENT),
                 (x0 + 10, y))
             y += 20
 
@@ -854,69 +906,135 @@ class GameUI:
             self.screen.blit(self.f_med.render("CONSTRUIR",
                                                True, C.ACCENT), (x0 + 10, y))
 
+        
         elif self.active_tab == 'war':
-            self.screen.blit(self.f_med.render("GUERRA E EXPANSÃO",
-                                               True, C.ACCENT), (x0 + 10, y))
+            self.screen.blit(self.f_med.render("GUERRA E EXPANSAO",
+                                               True, C.ACCENT),
+                             (x0 + 10, y))
             y += 18
+            desc = getattr(f, 'description', '')
+            if desc:
+                self.screen.blit(self.f_small.render(desc, True, C.DIM),
+                                 (x0 + 10, y))
+                y += 14
             self.screen.blit(self.f_small.render(
-                f"Guerras ativas: {len(f.war_declarations)}",
+                f"Guerras: {len(f.war_declarations)}   "
+                f"Aliados: {len(f.allies)}",
                 True, C.DIM), (x0 + 10, y))
 
     def _draw_bottombar(self):
         y0 = self.H - self.BOT_H
         pygame.draw.rect(self.screen, C.PANEL_BG,
-                         (0, y0, self.W - self.PANEL_W, self.BOT_H))
+                        (0, y0, self.W - self.PANEL_W, self.BOT_H))
         pygame.draw.line(self.screen, C.PANEL_BR,
-                         (0, y0), (self.W - self.PANEL_W, y0))
+                        (0, y0), (self.W - self.PANEL_W, y0))
 
         if not self.selected_star:
             self.screen.blit(self.f.render(
-                "Clique em estrela/planeta — aba Guerra controla "
-                "diplomacia e auto-colonização", True, C.DIM),
-                (12, y0 + 12))
+                "Clique em estrela/planeta — aba Sistema/Guerra controla tudo",
+                True, C.DIM), (12, y0 + 12))
             return
 
         s = self.selected_star
         self.screen.blit(self.f_med.render(f"* {s.name}", True, C.STAR),
-                         (10, y0 + 6))
+                        (10, y0 + 4))
         colonized = sum(1 for p in s.planets if p.is_colonized)
         self.screen.blit(self.f.render(
             f"Planetas: {len(s.planets)}  |  Colonizados: {colonized}",
             True, C.TEXT), (10, y0 + 24))
 
-        if self.selected_planet:
-            p = self.selected_planet
-            suit = p.get_suitability(self.faction)
-            tf = (f"  tf {p.terraform_level}/{p.max_terraform_level}"
-                  if p.is_colonized else "")
-            self.screen.blit(self.f.render(
-                f"  -> {p.name}  raio {p.radius:.3f}  suit={suit:.2f}{tf}",
-                True, C.TEXT), (10, y0 + 42))
+        if not self.selected_planet:
+            return
 
-            if p.is_colonized and p.faction:
+        p = self.selected_planet
+        suit = p.get_suitability(self.faction)
+        tf = (f"  tf {p.terraform_level}/{p.max_terraform_level}"
+            if p.is_colonized else "")
+        self.screen.blit(self.f.render(
+            f"  -> {p.name}  raio {p.radius:.3f}  suit={suit:.2f}{tf}",
+            True, C.TEXT), (10, y0 + 40))
+
+        hs = p.life_suitability
+        detail = (f"  Human={hs.get('Human', 0):.2f}  "
+                  f"Alien={hs.get('Alien', 0):.2f}  "
+                  f"Hybrid={hs.get('Hybrid', 0):.2f}  "
+                  f"Robot={hs.get('Robot', 0):.2f}")
+        self.screen.blit(self.f_small.render(detail, True, C.DIM),
+                        (10, y0 + 56))
+
+        if p.is_colonized and p.faction:
+            try:
+                caps = p.capacity_info()
+                pop_max = caps['max_pop']
+                dev_max = caps['max_dev']
+            except Exception:
+                pop_max, dev_max = 2000, 2.0
+            self.screen.blit(self.f_small.render(
+                f"  Pop {p.population:.0f}/{pop_max:.0f}  "
+                f"dev {p.developement:.2f}/{dev_max:.2f}  "
+                f"prod {p.production:.2f}",
+                True, C.DIM), (10, y0 + 70))
+
+            if p.max_defense > 0:
+                pct = max(0.0, p.defense / p.max_defense)
+                bar_x, bar_y = 10, y0 + 86
+                bar_w, bar_h = 260, 6
+                pygame.draw.rect(self.screen, (40, 40, 60),
+                                (bar_x, bar_y, bar_w, bar_h))
+                col = ((110, 220, 160) if pct > 0.6
+                    else (230, 200, 80) if pct > 0.3
+                    else C.SIEGE)
+                pygame.draw.rect(self.screen, col,
+                                (bar_x, bar_y, int(bar_w * pct), bar_h))
+                txt = f"DEF {p.defense:.0f}/{p.max_defense:.0f}"
                 self.screen.blit(self.f_small.render(
-                    f"  Pop {p.population:.0f}  dev {p.developement:.2f}  "
-                    f"prod {p.production:.2f}",
-                    True, C.DIM), (10, y0 + 58))
+                    txt, True, C.DIM), (bar_x + bar_w + 8, bar_y - 3))
 
-                # Barra de defesa
-                if p.max_defense > 0:
-                    pct = max(0.0, p.defense / p.max_defense)
-                    bar_x, bar_y = 10, y0 + 74
-                    bar_w, bar_h = 260, 6
-                    pygame.draw.rect(self.screen, (40, 40, 60),
-                                     (bar_x, bar_y, bar_w, bar_h))
-                    col = (110, 220, 160) if pct > 0.6 else (
-                        (230, 200, 80) if pct > 0.3 else C.SIEGE)
-                    pygame.draw.rect(self.screen, col,
-                                     (bar_x, bar_y, int(bar_w * pct), bar_h))
-                    txt = (f"DEFESA {p.defense:.0f}/{p.max_defense:.0f}"
-                           + ("  SOB CERCO" if pct < 1 and
-                              p.faction.name in
-                              self.faction.war_declarations else ""))
-                    self.screen.blit(self.f_small.render(
-                        txt, True, C.DIM if pct > 0.3 else C.SIEGE),
-                        (bar_x + bar_w + 8, bar_y - 3))
+        preview_size = 82
+        map_width = self.W - self.PANEL_W
+        preview_x = map_width - preview_size - 14
+        if preview_x > 320:
+            preview_y = y0 + (self.BOT_H - preview_size) // 2
+            card = pygame.Rect(
+                preview_x - 7, preview_y - 7,
+                preview_size + 14, preview_size + 27)
+            pygame.draw.rect(self.screen, (19, 34, 53), card,
+                             border_radius=8)
+            pygame.draw.rect(self.screen, C.PANEL_BR, card, 1,
+                             border_radius=8)
+            self.screen.blit(
+                self._planet_surface(p, preview_size),
+                (preview_x, preview_y),
+            )
+            category = dominant_suitability(p.life_suitability)
+            category_label = self.f_small.render(
+                category.upper(), True, C.ACCENT)
+            self.screen.blit(
+                category_label,
+                category_label.get_rect(
+                    centerx=preview_x + preview_size // 2,
+                    top=preview_y + preview_size + 4,
+                ),
+            )
+
+    def _planet_surface(self, planet, size):
+        suitability = tuple(sorted(planet.life_suitability.items()))
+        key = (id(planet), suitability, size)
+        if key not in self._planet_surfaces:
+            star_name = (planet.parent_star.name
+                         if planet.parent_star is not None else '')
+            seed = f"{star_name}:{planet.name}"
+            self._planet_surfaces[key] = generate_planet_surface(
+                planet.life_suitability, seed, size)
+        return self._planet_surfaces[key]
+
+    def _map_planet_surface(self, planet, size):
+        suitability = tuple(sorted(planet.life_suitability.items()))
+        key = (id(planet), suitability, size)
+        if key not in self._map_planet_surfaces:
+            self._map_planet_surfaces[key] = pygame.transform.smoothscale(
+                self._planet_surface(planet, 64), (size, size))
+        return self._map_planet_surfaces[key]
 
     def _draw_log(self):
         if not self.log:

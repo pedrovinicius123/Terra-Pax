@@ -1,19 +1,19 @@
 import threading
-from typing import Dict, Optional
+import math
+
+from queue import Empty
 from enum import Enum
-from queue import Queue
-
-import networkx as nx
-
-from graphics.star import Star, Planet
+from graphics.star import SIMULATION_STEP_YEARS
 from players.ships import Scout, ColonyShip, Transport, Warship
 
 RESEARCH_SCALE = 15.0
+BASE_COLONIZATION_RANGE = 600.0
+COLONIZATION_RANGE_PER_FTL_LEVEL = 100.0
 
 TECH_CAPS = {
-    'ftl': 10, 'exploration': 10, 'propulsion': 10,
-    'weapons': 10, 'shields': 10, 'sensors': 10,
-    'construction': 10,
+    'ftl': 100, 'exploration': 100, 'propulsion': 100,
+    'weapons': 100, 'shields': 100, 'sensors': 100,
+    'construction': 100,
 }
 
 class FactionType(Enum):
@@ -83,12 +83,15 @@ DESIGNS = {
 
 class Faction:
     def __init__(self, name, faction_type, home_planet, home_star,
-                 starting_resources=None, is_human=False):
+             starting_resources=None, is_human=False,
+             color=None, description=""):
+        
         self.name = name
         self.faction_type = faction_type
         self.home_star = home_star
         self.home_planet = home_planet
-        self.color = self._generate_faction_color()
+        self.color = color or self._generate_faction_color()
+        self.description = description
         self.is_human = is_human
         self.lock = threading.RLock()
 
@@ -138,6 +141,7 @@ class Faction:
         self.research_weights = {k: 1.0 for k in self.tech_tree}
         self.research_progress = {k: 0.0 for k in self.tech_tree}
         self.research_income_pool = 0.0
+        self.colonization_rng = BASE_COLONIZATION_RANGE
 
         self.diplomacy = {}
         self.war_declarations = set()
@@ -153,11 +157,21 @@ class Faction:
                       'research_completed': 0,
                       'planets_captured': 0}
 
+    def _set_colonization_rng(self):
+        self.colonization_rng = (
+            BASE_COLONIZATION_RANGE
+            + (self.tech_tree['ftl'] - 1) * COLONIZATION_RANGE_PER_FTL_LEVEL
+        )
+
     def _generate_faction_color(self):
-        return {FactionType.HUMAN: "#3498db",
-                FactionType.ALIEN: "#e74c3c",
-                FactionType.ROBOT: "#95a5a6",
-                FactionType.HYBRID: "#9b59b6"}.get(self.faction_type, "#fff")
+        """Fallback: cor derivada do nome — nunca repete entre facções."""
+        palette = [
+            "#3498db", "#e74c3c", "#bdc3c7", "#e67e22",
+            "#9b59b6", "#2ecc71", "#1abc9c", "#f39c12",
+            "#e91e63", "#7f8c8d", "#16a085", "#d35400",
+        ]
+        idx = sum(ord(c) for c in self.name) % len(palette)
+        return palette[idx]
 
     # ---------- Recursos ----------
     def _recompute_resources(self):
@@ -230,7 +244,23 @@ class Faction:
 
     # ---------- Auto-colonização ----------
     def find_best_colony_target(self, game_state,
-                                respect_reservations=True):
+                            respect_reservations=True,
+                            max_distance=None):
+        """Escolhe planeta por suitability ajustada por distância.
+
+        score = suitability × (1 - 0.5 × dist/max_dist)
+        → planeta 2× mais próximo vale ~1.5× mais.
+        """
+        if not self.colonies:
+            return None
+        if max_distance is None:
+            max_distance = self.colonization_rng
+        frontier = list(self.colonies.values())
+
+        def dist_to_empire(planet):
+            return min(math.dist(planet.abs_position, c.abs_position)
+                    for c in frontier)
+
         best_score, best = 0.0, None
         for star in game_state.stars:
             if star.name not in self.explored_stars:
@@ -241,10 +271,14 @@ class Faction:
                 if (respect_reservations
                         and planet.name in self.reserved_targets):
                     continue
-                score = planet.get_suitability(self)
+                d = dist_to_empire(planet)
+                if d > max_distance:
+                    continue
+                suit = planet.get_suitability(self)
+                score = suit * (1.0 - 0.5 * min(1.0, d / max_distance))
                 if score > best_score:
                     best_score, best = score, (star, planet)
-        return best if best_score > 0.25 else None
+        return best
 
     def auto_expand_step(self, game_state):
         """Um passo de auto-colonização. Cap = 1 colonizadora comprometida.
@@ -344,8 +378,11 @@ class Faction:
                 cost = self.get_research_cost(field)
                 if cost <= 0 or self.research_progress[field] < cost:
                     break
+
                 self.research_progress[field] -= cost
                 self.tech_tree[field] += 1
+                self._set_colonization_rng()
+
                 self.stats['research_completed'] += 1
 
     def set_research_weight(self, field: str, weight: float):
@@ -368,7 +405,7 @@ class Faction:
                        for p in self.colonies.values()
                        if p.is_colonized and p.faction is self)
         per_tick *= RESEARCH_SCALE
-        return per_tick / gs.tick_interval * gs.speed
+        return per_tick / SIMULATION_STEP_YEARS
     
     def get_research_cost(self, tech_field):
         base = {'exploration': 100, 'propulsion': 120, 'weapons': 150,
@@ -402,6 +439,63 @@ class Faction:
         if self.game_state is not None:
             for f in self.game_state.factions:
                 f.reserved_targets.discard(planet.name)
+        self._recompute_resources()
+        return True
+
+    def decolonize_planet(self, planet):
+        """Remove a colonia do imperio (pop chegou a zero). O planeta volta
+        a ser 'livre' e pode ser re-colonizado no futuro.
+
+        Efeitos colaterais:
+        - remove do dict colonies e do controle de sistemas
+        - zera population, defense, developement, recursos e fila
+        - mantem terraform_level (a atmosfera continua terraformada)
+        - se for a ultima colonia, marca a faccao como eliminada
+        """
+        if planet is None or planet.faction is not self:
+            return False
+
+        # Desvincula o planeta
+        self.colonies.pop(planet.name, None)
+        planet.faction = None
+        planet.is_colonized = False
+        planet.population = 0.0
+        planet.defense = 0.0
+        planet.developement = 0.0
+        planet.production = 1.0
+        planet.can_build_ships = False
+        # Zera recursos (foram consumidos na agonia)
+        for k in planet.planet_resources:
+            planet.planet_resources[k] = 0.0
+
+        # Limpa fila de construcao pendente
+        while True:
+            try:
+                planet.const_queue.get_nowait()
+            except Empty:
+                break
+
+        # Notifica o estado global
+        if self.game_state is not None:
+            for f in self.game_state.factions:
+                f.reserved_targets.discard(planet.name)
+            self.game_state._recompute_control()
+            self.game_state.log_event(
+                f"{self.name} perdeu {planet.name} (populacao zero)")
+
+        # Reassenta capital se necessario
+        if self.home_planet is planet and self.colonies:
+            self.home_planet = next(iter(self.colonies.values()))
+
+        # Eliminacao
+        if not self.colonies:
+            self.eliminated = True
+            for s in list(self.ships.values()):
+                s.alive = False
+                s.running = False
+            if self.game_state is not None:
+                self.game_state.log_event(f"{self.name} foi eliminada!")
+
         self._recompute_resources()
         return True
 
@@ -492,11 +586,14 @@ class Faction:
     
 
     def get_status_report(self):
-        return {'name': self.name, 'faction_type': self.faction_type.value,
+        return {'name': self.name,
+                'faction_type': self.faction_type.value,
+                'description': self.description,
                 'resources': dict(self.resources),
                 'tech_levels': dict(self.tech_tree),
                 'research_weights': dict(self.research_weights),
-                'colonies': len(self.colonies), 'ships': len(self.ships),
+                'colonies': len(self.colonies),
+                'ships': len(self.ships),
                 'stars_explored': len(self.explored_stars)}
 
     def stop_faction(self):

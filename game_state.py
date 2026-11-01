@@ -7,7 +7,10 @@ from players.ships import Warship
 
 
 class GameState:
+    START_YEAR = 2150
+
     def __init__(self, map_G, stars, factions, tick_interval=0.5):
+        self.event_log = []
         self.map_G = map_G
         self.stars = stars
         self.factions = factions
@@ -23,10 +26,14 @@ class GameState:
         for f in factions:
             f.game_state = self
 
+    @property
+    def year(self):
+        return self.START_YEAR + math.floor(self.time + 1e-9)
+
     def log_event(self, msg):
         self.event_log.append((self.time, msg))
-        print(f"[{self.time:6.1f}s] {msg}")
-
+        print(f"[{self.year}] {msg}")
+        
     def start(self):
         self.running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -41,13 +48,25 @@ class GameState:
     def tick(self, dt):
         with self.lock:
             self.time += dt
+
+            # 1. Crescimento e producao
             for star in self.stars:
                 for planet in star.planets:
                     if planet.is_colonized and planet.faction:
                         try:
-                            planet.develop()
+                            planet.develop(dt)
                         except Exception as e:
                             print(f"[planet {planet.name}] {e}")
+
+            # 2. Descolonizacao por populacao zero
+            for star in self.stars:
+                for planet in star.planets:
+                    if (planet.is_colonized
+                            and planet.faction is not None
+                            and (planet.population <= 0 or planet.developement < 0.05)):
+                        planet.faction.decolonize_planet(planet)
+
+            # 3. Pesquisa e economia
             for f in self.factions:
                 if f.eliminated:
                     continue
@@ -56,8 +75,12 @@ class GameState:
                     f.process_research(dt)
                 except Exception as e:
                     print(f"[faction {f.name}] {e}")
+
+            # 4. Combate e cercos
             self._resolve_combat(dt)
             self._resolve_sieges(dt)
+
+            # 5. Controllers (IA / jogador)
             for f in self.factions:
                 if f.eliminated or f.controller is None:
                     continue
@@ -102,7 +125,7 @@ class GameState:
                            if st == DiplomacyStatus.WAR}
             if not enemy_names:
                 continue
-            warships = [s for s in f.ships.values()
+            warships = [s for s in f.ships.copy().values()
                         if isinstance(s, Warship) and s.alive]
             if not warships:
                 continue

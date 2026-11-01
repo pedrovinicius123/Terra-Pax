@@ -5,6 +5,9 @@ import threading
 import time
 
 
+SIMULATION_STEP_YEARS = 0.5
+
+
 @dataclass(eq=False)
 class Planet:
     n_planet_resources: int
@@ -17,6 +20,8 @@ class Planet:
     radius: float
     is_colonized: bool
     name: str
+    star_position:tuple
+
 
     def post_init(self):
         self.const_queue = Queue()
@@ -33,7 +38,7 @@ class Planet:
         self.ships = []
         self.parent_star = None
         self.terraform_level = 0
-        self.max_terraform_level = 3
+        self.max_terraform_level = 6
         self.defense = 0.0
         self.max_defense = 100.0
         for k in ('Minerals', 'Food', 'Energy', 'Electronics',
@@ -41,10 +46,6 @@ class Planet:
             self.planet_resources.setdefault(k, 0.0)
 
     def get_suitability(self, faction) -> float:
-        if faction is None:
-            return 0.0
-        if faction.name in self.life_suitability:
-            return self.life_suitability[faction.name]
         key = faction.faction_type.value if hasattr(faction, 'faction_type') else None
         if key and key in self.life_suitability:
             return self.life_suitability[key]
@@ -52,13 +53,8 @@ class Planet:
 
     def _compute_caps(self):
         """Teto de desenvolvimento e população por nível de terraformação."""
-        tier = min(getattr(self, 'terraform_level', 0), 3)
-        caps = [
-            (2.0, 2_000),
-            (5.0, 6_000),
-            (10.0, 15_000),
-            (20.0, 40_000),
-        ]
+        tier = min(getattr(self, 'terraform_level', 0), 5)
+        caps = [(3.0, 3_000), (7.0, 8_000), (14.0, 20_000), (25.0, 50_000), (50.0, 100_000), (75.0, 1_000_000)]
         return caps[tier]
 
     def capacity_info(self) -> dict:
@@ -70,13 +66,16 @@ class Planet:
             'pop_capped': self.population >= max_pop - 1e-6,
         }
 
-    def develop(self):
+    def develop(self, dt: float = SIMULATION_STEP_YEARS):
+        step_scale = dt / SIMULATION_STEP_YEARS
+        growth_factor = 1.02 ** step_scale
         max_dev, max_pop = self._compute_caps()
 
         if self.developement < max_dev:
-            self.developement = min(max_dev, self.developement * 1.02)
+            self.developement = min(max_dev,
+                                    self.developement * growth_factor)
         if self.population < max_pop:
-            self.population = min(max_pop, self.population * 1.02)
+            self.population = min(max_pop, self.population * growth_factor)
 
         # Libera construção assim que a colônia cresce um pouco
         if self.developement > 0.3:
@@ -86,10 +85,11 @@ class Planet:
         if (self.is_colonized and self.max_defense > 0
                 and self.defense < self.max_defense):
             self.defense = min(self.max_defense,
-                               self.defense + 1.5 * self.developement)
+                               self.defense
+                               + 1.5 * self.developement * step_scale)
 
         self.const()
-        self.produce()
+        self.produce(step_scale)
 
     def can_afford(self, cost: Dict[str, float]) -> bool:
         for resource, amount in cost.items():
@@ -163,22 +163,38 @@ class Planet:
         except Exception as e:
             print(f"[{self.name}] erro construindo: {e}")
 
-    def produce(self):
+    def produce(self, step_scale: float = 1.0):
         if self.faction is None:
             return
-        prod = self.production * self.developement
+        prod = self.production * self.developement * step_scale
         for resource in list(self.planet_resources.keys()):
             if resource == 'Research':
-                self.faction.add_research_income(prod)   # ← NOVO
+                self.faction.add_research_income(prod)
                 continue
+
             cap = self.storage_capacity.get(resource, 0)
+
+            if resource == 'Food':
+                # Produção primeiro (limitada ao cap)
+                if self.planet_resources[resource] < cap:
+                    room = cap - self.planet_resources[resource]
+                    self.planet_resources[resource] += min(prod, room)
+                # Consumo
+                self.planet_resources[resource] -= (
+                    self.population * 1e-4 * step_scale)
+                # Déficit → fome
+                if self.planet_resources[resource] < 0:
+                    deficit = -self.planet_resources[resource]
+                    self.planet_resources[resource] = 0.0
+                    self.population -= deficit * 1000.0
+                    if self.population < 0:
+                        self.population = 0.0
+                continue
+
             if self.planet_resources[resource] >= cap:
                 continue
-            if resource == 'Food':
-                self.planet_resources[resource] -= self.population * 1e-4
-                if self.planet_resources[resource] < 0:
-                    self.planet_resources[resource] = 0
             self.planet_resources[resource] += prod
+
 
     def remove_resource(self, resource_type: str, amount: float) -> bool:
         if resource_type not in self.planet_resources:
