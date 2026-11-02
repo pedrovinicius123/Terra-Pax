@@ -29,6 +29,26 @@ def generate_suitability_profile(
     }
 
 
+def generate_gas_giant_suitability(
+        rng: random.Random | None = None) -> dict[str, float]:
+    """Hostile profile: gas giants barely sustain any life."""
+    generator = random if rng is None else rng
+    return {
+        category: generator.uniform(0.02, 0.18)
+        for category in SUITABILITY_STYLES
+    }
+
+
+def generate_asteroid_suitability(
+        rng: random.Random | None = None) -> dict[str, float]:
+    """Low profile: belt bodies only support small outpost populations."""
+    generator = random if rng is None else rng
+    return {
+        category: generator.uniform(0.05, 0.35)
+        for category in SUITABILITY_STYLES
+    }
+
+
 def dominant_suitability(suitability: Mapping[str, float]) -> str:
     return max(
         SUITABILITY_STYLES,
@@ -591,8 +611,14 @@ def _sample_pixels_bilinear(
 def generate_planet_surface(
         suitability: Mapping[str, float], seed: str,
         size: int = 96, city_lights: float = 0.0,
-        detail_level: int = 3) -> pygame.Surface:
+        detail_level: int = 3, planet_type: str = 'terrestrial',
+        rings: bool = False) -> pygame.Surface:
     """Render a repeatable, randomly textured 2D planet for a world."""
+    if planet_type == 'gas_giant':
+        return generate_gas_giant_surface(
+            seed, size, detail_level, rings=rings)
+    if planet_type == 'asteroid':
+        return generate_asteroid_surface(seed, size, detail_level)
     if size < 16:
         raise ValueError("Planet surfaces must be at least 16 pixels wide")
     if not isinstance(detail_level, int) or not 1 <= detail_level <= 8:
@@ -684,8 +710,13 @@ def generate_planet_surface(
 def generate_planet_texture(
         suitability: Mapping[str, float], seed: str,
         size: tuple[int, int] = (256, 128),
-        detail_level: int = 3) -> pygame.Surface:
+        detail_level: int = 3,
+        planet_type: str = 'terrestrial') -> pygame.Surface:
     """Create a repeatable equirectangular surface for 3D planet rendering."""
+    if planet_type == 'gas_giant':
+        return generate_gas_giant_texture(seed, size, detail_level)
+    if planet_type == 'asteroid':
+        return generate_asteroid_texture(seed, size, detail_level)
     width, height = size
     if width < 32 or height < 16:
         raise ValueError("Planet textures must be at least 32x16 pixels")
@@ -731,3 +762,254 @@ def generate_planet_texture(
     rgb = np.clip(color, 0, 255).astype(np.uint8)
     return pygame.surfarray.make_surface(
         np.transpose(rgb, (1, 0, 2)))
+
+
+GAS_GIANT_PALETTES = (
+    ((235, 205, 160), (150, 106, 70), (206, 120, 86)),
+    ((182, 216, 228), (86, 132, 158), (232, 244, 250)),
+    ((216, 158, 122), (122, 74, 62), (244, 190, 150)),
+    ((170, 178, 222), (92, 100, 158), (222, 228, 252)),
+    ((224, 206, 158), (152, 124, 78), (248, 236, 196)),
+)
+
+ASTEROID_PALETTES = (
+    ((150, 142, 132), (96, 90, 82), (190, 182, 170)),
+    ((132, 118, 104), (84, 74, 66), (172, 158, 140)),
+    ((118, 120, 126), (76, 78, 86), (162, 166, 174)),
+)
+
+
+def _check_texture_arguments(size: tuple[int, int],
+                             detail_level: int) -> tuple[int, int]:
+    width, height = size
+    if width < 32 or height < 16:
+        raise ValueError("Planet textures must be at least 32x16 pixels")
+    if not isinstance(detail_level, int) or not 1 <= detail_level <= 8:
+        raise ValueError("Texture detail must be an integer from 1 to 8")
+    pixel_scale = 0.5 + detail_level * 0.5
+    return round(width * pixel_scale), round(height * pixel_scale)
+
+
+def gas_giant_palette(seed: str) -> tuple[tuple[int, int, int], ...]:
+    """Return the (light, dark, storm) palette chosen for a gas giant."""
+    generator = random.Random(_stable_seed(f"{seed}:gas-giant"))
+    return GAS_GIANT_PALETTES[
+        generator.randrange(len(GAS_GIANT_PALETTES))]
+
+
+def generate_gas_giant_texture(
+        seed: str, size: tuple[int, int] = (256, 128),
+        detail_level: int = 3) -> pygame.Surface:
+    """Banded equirectangular texture with turbulence and storm ovals."""
+    width, height = _check_texture_arguments(size, detail_level)
+    x, y, z = _sphere_coordinates((width, height))
+    latitude = np.arcsin(np.clip(y, -1.0, 1.0))
+    longitude = np.arctan2(x, z)
+
+    generator = random.Random(_stable_seed(f"{seed}:gas-giant"))
+    light_band, dark_band, storm_color = gas_giant_palette(seed)
+    noise = np.random.default_rng(_stable_seed(f"{seed}:gas-bands"))
+
+    turbulence = (
+        0.5 * _spherical_value_noise(x, y, z, 6, noise)
+        + 0.5 * _spherical_value_noise(x, y, z, 12, noise))
+    band_frequency = generator.uniform(3.0, 6.0)
+    phase = latitude * band_frequency + (turbulence - 0.5) * 2.8
+    band = 0.5 + 0.5 * np.sin(phase * math.tau)
+    streaks = _spherical_value_noise(
+        x, y, z, min(96, 12 + 6 * detail_level), noise)
+    band = np.clip(band + (streaks - 0.5) * 0.3, 0.0, 1.0)
+
+    light_rgb = np.asarray(light_band, dtype=np.float32)
+    dark_rgb = np.asarray(dark_band, dtype=np.float32)
+    color = dark_rgb * (1.0 - band[..., None]) + (
+        light_rgb * band[..., None])
+    color *= (0.86 + 0.28 * turbulence)[..., None]
+
+    for index in range(generator.randint(1, 4)):
+        major = index == 0
+        center_lat = (generator.uniform(-0.9, 0.9) if major
+                      else generator.uniform(-1.2, 1.2))
+        center_lon = generator.uniform(-math.pi, math.pi)
+        radius_x = (generator.uniform(0.35, 0.7) if major
+                    else generator.uniform(0.1, 0.3))
+        radius_y = (generator.uniform(0.14, 0.24) if major
+                    else generator.uniform(0.05, 0.12))
+        delta_lon = (
+            ((longitude - center_lon + math.pi) % math.tau - math.pi)
+            * max(0.25, abs(math.cos(center_lat))) / radius_x)
+        delta_lat = (latitude - center_lat) / radius_y
+        blob = np.clip(
+            1.0 - delta_lon ** 2 - delta_lat ** 2, 0.0, 1.0) ** 2
+        tint = (np.asarray(storm_color, dtype=np.float32) if major
+                else light_rgb * generator.uniform(0.9, 1.1))
+        strength = 0.9 if major else 0.55
+        color = color * (1.0 - blob[..., None] * strength) + (
+            tint * blob[..., None] * strength)
+
+    polar = np.clip((np.abs(latitude) - 1.12) / 0.35, 0.0, 1.0)
+    color = color * (1.0 - 0.3 * polar[..., None]) + (
+        dark_rgb * 0.3 * polar[..., None])
+
+    rgb = np.clip(color, 0, 255).astype(np.uint8)
+    return pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
+
+
+def generate_asteroid_texture(
+        seed: str, size: tuple[int, int] = (256, 128),
+        detail_level: int = 3) -> pygame.Surface:
+    """Cratered grey-brown equirectangular texture for belt bodies."""
+    width, height = _check_texture_arguments(size, detail_level)
+    x, y, z = _sphere_coordinates((width, height))
+    latitude = np.arcsin(np.clip(y, -1.0, 1.0))
+    longitude = np.arctan2(x, z)
+
+    generator = random.Random(_stable_seed(f"{seed}:asteroid"))
+    base_rgb_tuple, dark_rgb_tuple, bright_rgb = ASTEROID_PALETTES[
+        generator.randrange(len(ASTEROID_PALETTES))]
+    noise = np.random.default_rng(_stable_seed(f"{seed}:asteroid-surface"))
+
+    mottle = (
+        0.5 * _spherical_value_noise(x, y, z, 4, noise)
+        + 0.5 * _spherical_value_noise(x, y, z, 9, noise))
+    base_rgb = np.asarray(base_rgb_tuple, dtype=np.float32)
+    color = base_rgb * (0.72 + 0.56 * mottle[..., None])
+
+    dark_rgb = np.asarray(dark_rgb_tuple, dtype=np.float32)
+    bright_rgb = np.asarray(bright_rgb, dtype=np.float32)
+    for _ in range(generator.randint(24, 60)):
+        center_lat = generator.uniform(-1.35, 1.35)
+        center_lon = generator.uniform(-math.pi, math.pi)
+        radius = generator.uniform(0.05, 0.30)
+        delta_lon = (
+            ((longitude - center_lon + math.pi) % math.tau - math.pi)
+            * max(0.25, abs(math.cos(center_lat))) / radius)
+        delta_lat = (latitude - center_lat) / radius
+        distance = np.hypot(delta_lon, delta_lat)
+        bowl = np.clip((0.8 - distance) / 0.8, 0.0, 1.0) ** 1.5
+        rim = np.clip(1.0 - np.abs(distance - 0.94) / 0.26, 0.0, 1.0)
+        color = color * (1.0 - 0.4 * bowl[..., None]) + (
+            dark_rgb * 0.4 * bowl[..., None])
+        color = color + (bright_rgb - color) * (
+            rim[..., None] * 0.28)
+
+    rgb = np.clip(color, 0, 255).astype(np.uint8)
+    return pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
+
+
+@lru_cache(maxsize=64)
+def _asteroid_shape(seed: str) -> tuple[tuple[int, float, float], ...]:
+    generator = random.Random(_stable_seed(f"{seed}:asteroid-shape"))
+    return tuple(
+        (harmonic, generator.uniform(0.05, 0.16) / harmonic ** 0.5,
+         generator.uniform(0.0, math.tau))
+        for harmonic in (1, 2, 3, 4, 5)
+    )
+
+
+def asteroid_radius_factor(seed: str,
+                           theta: np.ndarray) -> np.ndarray:
+    """Lumpy silhouette radius multiplier for an asteroid at screen angle."""
+    factor = np.ones_like(theta, dtype=np.float32)
+    for harmonic, amplitude, phase in _asteroid_shape(seed):
+        factor += amplitude * np.sin(harmonic * theta + phase)
+    return np.clip(factor, 0.62, 1.38)
+
+
+def _shaded_sphere_from_texture(
+        texture: pygame.Surface, size: int, radius: np.ndarray | float,
+        center: float, ambient: float) -> pygame.Surface:
+    """Project an equirectangular texture onto a (possibly lumpy) disc."""
+    texture_pixels = _surface_array(texture)
+    sphere = pygame.Surface((size, size), pygame.SRCALPHA)
+    x_grid, y_grid = np.meshgrid(
+        np.arange(size, dtype=np.float32),
+        np.arange(size, dtype=np.float32))
+    nx = (x_grid - center) / radius
+    ny = (center - y_grid) / radius
+    nz_squared = 1.0 - nx ** 2 - ny ** 2
+    mask = nz_squared >= 0.0
+    nz = np.sqrt(np.maximum(0.0, nz_squared))
+    longitude = np.arctan2(nx, nz)
+    latitude = np.arcsin(np.clip(ny, -1.0, 1.0))
+    sun = np.asarray(PLANET_SUN_DIRECTION, dtype=np.float32)
+    sun /= np.linalg.norm(sun)
+    illumination = nx * sun[0] + ny * sun[1] + nz * sun[2]
+    brightness = ambient + (1.0 - ambient) * np.maximum(0.0, illumination)
+    sample_x = (longitude / math.tau + 0.5) * texture.get_width() - 0.5
+    sample_y = (0.5 - latitude / math.pi) * texture.get_height() - 0.5
+    shaded = _sample_pixels_bilinear(
+        texture_pixels, sample_x, sample_y) * brightness[..., None]
+    shaded = np.clip(shaded, 0, 255).astype(np.uint8)
+
+    pixels3d = pygame.surfarray.pixels3d(sphere)
+    pixels3d[:, :, :] = np.transpose(shaded, (1, 0, 2))
+    del pixels3d
+    pixels_alpha = pygame.surfarray.pixels_alpha(sphere)
+    pixels_alpha[:, :] = np.transpose(
+        mask.astype(np.uint8) * 255, (1, 0))
+    del pixels_alpha
+    return sphere
+
+
+def generate_gas_giant_surface(
+        seed: str, size: int = 96, detail_level: int = 3,
+        rings: bool = False) -> pygame.Surface:
+    """Render a banded gas giant, optionally with a ring system."""
+    if size < 16:
+        raise ValueError("Planet surfaces must be at least 16 pixels wide")
+    texture = generate_gas_giant_texture(
+        seed, (size * 2, size), detail_level=detail_level)
+    center = size // 2
+    radius = int(size * 0.43)
+    body = _shaded_sphere_from_texture(texture, size, radius, center, 0.15)
+
+    _, _, highlight = gas_giant_palette(seed)
+    pygame.draw.arc(
+        body, highlight,
+        (center - radius + 2, center - radius + 2,
+         radius * 2 - 4, radius * 2 - 4),
+        3.8, 5.7, max(1, size // 32),
+    )
+
+    if not rings:
+        return body
+
+    light_band, dark_band, _ = gas_giant_palette(seed)
+    ring_color = tuple(
+        int(0.45 * dark_band[axis] + 0.55 * light_band[axis])
+        for axis in range(3))
+    back = pygame.Surface((size, size), pygame.SRCALPHA)
+    front = pygame.Surface((size, size), pygame.SRCALPHA)
+    semi_major = int(size * 0.49)
+    semi_minor = max(2, int(size * 0.12))
+    dot = max(1, size // 40)
+    for t in np.linspace(0.0, math.tau, 240):
+        x = int(center + semi_major * math.cos(t))
+        y = int(center + semi_minor * math.sin(t))
+        target = front if math.sin(t) >= 0.0 else back
+        pygame.draw.circle(target, ring_color, (x, y), dot)
+        pygame.draw.circle(target, ring_color, (x, y - 1), max(1, dot - 1))
+    composed = pygame.Surface((size, size), pygame.SRCALPHA)
+    composed.blit(back, (0, 0))
+    composed.blit(body, (0, 0))
+    composed.blit(front, (0, 0))
+    return composed
+
+
+def generate_asteroid_surface(
+        seed: str, size: int = 64, detail_level: int = 3) -> pygame.Surface:
+    """Render a cratered, irregularly shaped asteroid body."""
+    if size < 16:
+        raise ValueError("Planet surfaces must be at least 16 pixels wide")
+    texture = generate_asteroid_texture(
+        seed, (size * 2, size), detail_level=detail_level)
+    center = size // 2
+    base_radius = int(size * 0.34)
+    x_grid, y_grid = np.meshgrid(
+        np.arange(size, dtype=np.float32),
+        np.arange(size, dtype=np.float32))
+    theta = np.arctan2(y_grid - center, x_grid - center)
+    radius = base_radius * asteroid_radius_factor(seed, theta)
+    radius = np.maximum(radius, 1.0)
+    return _shaded_sphere_from_texture(texture, size, radius, center, 0.06)

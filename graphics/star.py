@@ -13,6 +13,27 @@ ECONOMIC_RECIPES = {
     'Alloys': {'Minerals': 0.5, 'Energy': 0.2},
 }
 
+PLANET_TYPES = ('terrestrial', 'gas_giant', 'asteroid')
+
+# Multiplicadores de produção por recurso — asteroides são mundos
+# mineradores, gigantes gasosos coletores de energia.
+TYPE_RESOURCE_YIELDS = {
+    'terrestrial': {},
+    'asteroid': {'Minerals': 2.6, 'Alloys': 1.5, 'Food': 0.25,
+                 'Energy': 0.7, 'Chemicals': 0.6},
+    'gas_giant': {'Energy': 3.0, 'Chemicals': 1.6, 'Food': 0.15,
+                  'Minerals': 0.25, 'Electronics': 0.5},
+}
+
+# (desenvolvimento, população) relativos aos limites terrestres.
+TYPE_CAPACITY_SCALE = {
+    'terrestrial': (1.0, 1.0),
+    'asteroid': (0.6, 0.12),
+    'gas_giant': (0.45, 0.05),
+}
+
+TYPE_MAX_TERRAFORM = {'terrestrial': 6, 'asteroid': 2, 'gas_giant': 0}
+
 
 @dataclass(eq=False)
 class Planet:
@@ -27,6 +48,7 @@ class Planet:
     is_colonized: bool
     name: str
     star_position:tuple
+    planet_type: str = 'terrestrial'
 
 
     def post_init(self):
@@ -44,9 +66,19 @@ class Planet:
         self.ships = []
         self.parent_star = None
         self.terraform_level = 0
-        self.max_terraform_level = 6
+        self.max_terraform_level = TYPE_MAX_TERRAFORM.get(
+            self.planet_type, 6)
         self.defense = 0.0
         self.max_defense = 100.0
+        self.has_rings = False
+        if self.planet_type == 'asteroid':
+            self.storage_capacity['Minerals'] = 30_000
+            self.storage_capacity['Alloys'] = 4_000
+            self.storage_capacity['Food'] = 2_500
+        elif self.planet_type == 'gas_giant':
+            self.storage_capacity['Energy'] = 30_000
+            self.storage_capacity['Chemicals'] = 6_000
+            self.storage_capacity['Food'] = 1_500
         for k in ('Minerals', 'Food', 'Energy', 'Electronics',
                   'Chemicals', 'Alloys', 'Research'):
             self.planet_resources.setdefault(k, 0.0)
@@ -61,7 +93,10 @@ class Planet:
         """Teto de desenvolvimento e população por nível de terraformação."""
         tier = min(getattr(self, 'terraform_level', 0), 5)
         caps = [(3.0, 3_000), (7.0, 8_000), (14.0, 20_000), (25.0, 50_000), (50.0, 100_000), (75.0, 1_000_000)]
-        return caps[tier]
+        max_dev, max_pop = caps[tier]
+        dev_scale, pop_scale = TYPE_CAPACITY_SCALE.get(
+            getattr(self, 'planet_type', 'terrestrial'), (1.0, 1.0))
+        return max_dev * dev_scale, max_pop * pop_scale
 
     def capacity_info(self) -> dict:
         max_dev, max_pop = self._compute_caps()
@@ -199,6 +234,7 @@ class Planet:
         prod = (
             self.production * self.developement * step_scale
             * self.faction.economy_multiplier)
+        yields = TYPE_RESOURCE_YIELDS.get(self.planet_type, {})
         game_state = getattr(self.faction, 'game_state', None)
         economic_mode = (
             game_state is not None
@@ -209,8 +245,9 @@ class Planet:
             manufacturing_efficiency += min(
                 0.45, max(0, construction - 1) * 0.05)
         for resource in list(self.planet_resources.keys()):
+            rate = prod * yields.get(resource, 1.0)
             if resource == 'Research':
-                self.faction.add_research_income(prod)
+                self.faction.add_research_income(rate)
                 continue
             if resource == 'Credits':
                 continue
@@ -219,7 +256,7 @@ class Planet:
             if economic_mode and resource in ECONOMIC_RECIPES:
                 recipe = ECONOMIC_RECIPES[resource]
                 output = min(
-                    prod * manufacturing_efficiency,
+                    rate * manufacturing_efficiency,
                     max(0.0, cap - self.planet_resources[resource]))
                 for ingredient, units_per_output in recipe.items():
                     output = min(
@@ -236,7 +273,7 @@ class Planet:
                 # Produção primeiro (limitada ao cap)
                 if self.planet_resources[resource] < cap:
                     room = cap - self.planet_resources[resource]
-                    self.planet_resources[resource] += min(prod, room)
+                    self.planet_resources[resource] += min(rate, room)
                 # Consumo
                 self.planet_resources[resource] -= (
                     self.population * 1e-4 * step_scale)
@@ -251,7 +288,7 @@ class Planet:
 
             if self.planet_resources[resource] >= cap:
                 continue
-            self.planet_resources[resource] += prod
+            self.planet_resources[resource] += rate
 
 
     def remove_resource(self, resource_type: str, amount: float) -> bool:

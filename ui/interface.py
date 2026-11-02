@@ -1,4 +1,5 @@
 import math
+import random
 import numpy as np
 import pygame
 
@@ -16,7 +17,7 @@ from graphics.planet_generator import (
     generate_planet_surface,
 )
 from graphics.ship_sprites import get_ship_sprite
-from logistics.game_3d import PlanetViewer3D
+from logistics.game_3d import PLANET_TYPE_LABELS, PlanetViewer3D, planet_type_of
 
 
 class C:
@@ -29,6 +30,9 @@ class C:
     PLANET_FREE_LOW  = (226, 112, 121)
     PLANET_MINE      = (82, 220, 177)
     PLANET_ENEMY     = (226, 112, 121)
+    PLANET_ASTEROID  = (160, 150, 138)
+    PLANET_GIANT     = (216, 182, 132)
+    BELT_SPECK       = (118, 110, 98)
     SELECTED    = (124, 224, 255)
     PANEL_BG    = (13, 23, 41)
     PANEL_BR    = (40, 67, 93)
@@ -200,6 +204,7 @@ class GameUI:
         self.log = []
         self._planet_surfaces = {}
         self._map_planet_surfaces = {}
+        self._belt_speck_cache = {}
         self.planet_viewer = None
         self._last_event_idx = 0
         self._top_buttons = []
@@ -831,6 +836,11 @@ class GameUI:
         if p.is_colonized:
             return (C.PLANET_MINE if p.faction is self.faction
                     else C.PLANET_ENEMY)
+        planet_type = planet_type_of(p)
+        if planet_type == 'asteroid':
+            return C.PLANET_ASTEROID
+        if planet_type == 'gas_giant':
+            return C.PLANET_GIANT
         suit = p.get_suitability(self.faction)
         if suit >= 0.7:
             return C.PLANET_FREE_GOOD
@@ -1209,6 +1219,7 @@ class GameUI:
             if s is self.selected_star:
                 pygame.draw.circle(self.screen, C.SELECTED,
                                    (sx, sy), r + 4, 2)
+            self._draw_belt_specks(s)
             for p in s.planets:
                 if not self._should_draw_planet(p):
                     continue
@@ -1235,6 +1246,40 @@ class GameUI:
                     if p is self.selected_planet:
                         pygame.draw.circle(self.screen, C.SELECTED,
                                            (px, py), pr + 3, 1)
+
+    def _belt_specks(self, star):
+        cached = self._belt_speck_cache.get(star.name)
+        if cached is None:
+            cached = []
+            distances = sorted({
+                p.distance_from_star for p in star.planets
+                if planet_type_of(p) == 'asteroid'})
+            base = distances[0] if distances else 1.0
+            for dist in distances:
+                generator = random.Random(f"{star.name}:belt:{dist:.4f}")
+                omega = 0.25 * (base / max(dist, 1e-6)) ** 1.5
+                specks = [(generator.uniform(0, math.tau),
+                           generator.uniform(-0.035, 0.035))
+                          for _ in range(26)]
+                cached.append((dist, omega, specks))
+            self._belt_speck_cache[star.name] = cached
+        return cached
+
+    def _draw_belt_specks(self, star):
+        for dist, omega, specks in self._belt_specks(star):
+            orbit_px = dist * self.zoom
+            if orbit_px < 8 or orbit_px > self.W:
+                continue
+            phase = self.state.time * omega
+            for angle0, jitter in specks:
+                angle = angle0 + phase
+                r = dist * (1.0 + jitter)
+                px, py = self.world_to_screen(
+                    star.position[0] + r * math.cos(angle),
+                    star.position[1] + r * math.sin(angle))
+                if -2 <= px <= self.W + 2 and -2 <= py <= self.H + 2:
+                    pygame.draw.circle(self.screen, C.BELT_SPECK,
+                                       (px, py), 1)
 
     def _draw_colony_routes(self):
         for faction in self.state.factions:
@@ -1521,8 +1566,13 @@ class GameUI:
         suit = p.get_suitability(self.faction)
         tf = (f"  tf {p.terraform_level}/{p.max_terraform_level}"
             if p.is_colonized else "")
+        type_label = PLANET_TYPE_LABELS.get(
+            planet_type_of(p), 'Planeta')
+        if getattr(p, 'has_rings', False):
+            type_label += " (aneis)"
         self.screen.blit(self.f.render(
-            f"  -> {p.name}  raio {p.radius:.3f}  suit={suit:.2f}{tf}",
+            f"  -> {p.name}  {type_label}  raio {p.radius:.3f}"
+            f"  suit={suit:.2f}{tf}",
             True, C.TEXT), (10, y0 + 40))
 
         hs = p.life_suitability
@@ -1578,6 +1628,11 @@ class GameUI:
                 (preview_x, preview_y),
             )
             category = dominant_suitability(p.life_suitability)
+            planet_type = planet_type_of(p)
+            if planet_type == 'asteroid':
+                category = 'MINERADOR'
+            elif planet_type == 'gas_giant':
+                category = 'ENERGIA'
             category_label = self.f_small.render(
                 category.upper(), True, C.ACCENT)
             self.screen.blit(
@@ -1594,14 +1649,18 @@ class GameUI:
         lights = round(city_light_intensity(
             planet.developement, planet.population,
             capacity['max_dev'], capacity['max_pop'],), 2)
-        key = (id(planet), suitability, size, lights, self.texture_detail)
+        planet_type = planet_type_of(planet)
+        rings = bool(getattr(planet, 'has_rings', False))
+        key = (id(planet), suitability, size, lights, self.texture_detail,
+               planet_type, rings)
         if key not in self._planet_surfaces:
             star_name = (planet.parent_star.name
                          if planet.parent_star is not None else '')
             seed = f"{star_name}:{planet.name}"
             self._planet_surfaces[key] = generate_planet_surface(
                 planet.life_suitability, seed, size, city_lights=lights,
-                detail_level=self.texture_detail)
+                detail_level=self.texture_detail, planet_type=planet_type,
+                rings=rings)
         return self._planet_surfaces[key]
 
     def _map_planet_surface(self, planet, size):
@@ -1610,7 +1669,9 @@ class GameUI:
         lights = round(city_light_intensity(
             planet.developement, planet.population,
             capacity['max_dev'], capacity['max_pop'],), 2)
-        key = (id(planet), suitability, size, lights, self.texture_detail)
+        key = (id(planet), suitability, size, lights, self.texture_detail,
+               planet_type_of(planet), bool(getattr(planet, 'has_rings',
+                                                   False)))
         if key not in self._map_planet_surfaces:
             render_size = min(512, max(64, 1 << (size - 1).bit_length()))
             surface = self._planet_surface(planet, render_size)

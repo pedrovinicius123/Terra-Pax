@@ -558,16 +558,33 @@ class Faction:
     def establish_colony(self, star, planet):
         planet.is_colonized = True
         planet.faction = self
-        planet.population = 500
-        planet.production = 0.5
+        planet_type = getattr(planet, 'planet_type', 'terrestrial')
+        founding = {
+            'terrestrial': (500, 0.5),
+            'asteroid': (240, 0.8),
+            'gas_giant': (140, 0.6),
+        }.get(planet_type, (500, 0.5))
+        planet.population = founding[0]
+        planet.production = founding[1]
         planet.developement = 0.1
         planet.can_build_ships = False
         planet.defense = 200.0
         planet.max_defense = 200.0
-        planet.planet_resources = {
-            'Minerals': 100, 'Food': 200, 'Energy': 100,
-            'Electronics': 20, 'Chemicals': 20, 'Alloys': 10,
-            'Credits': 0.0, 'Research': 0.0}
+        initial_resources = {
+            'terrestrial': {'Minerals': 100, 'Food': 200, 'Energy': 100,
+                            'Electronics': 20, 'Chemicals': 20,
+                            'Alloys': 10},
+            'asteroid': {'Minerals': 800, 'Food': 60, 'Energy': 80,
+                         'Electronics': 10, 'Chemicals': 10,
+                         'Alloys': 60},
+            'gas_giant': {'Minerals': 30, 'Food': 20, 'Energy': 900,
+                          'Electronics': 10, 'Chemicals': 150,
+                          'Alloys': 5},
+        }.get(planet_type, {'Minerals': 100, 'Food': 200, 'Energy': 100,
+                            'Electronics': 20, 'Chemicals': 20,
+                            'Alloys': 10})
+        initial_resources.update({'Credits': 0.0, 'Research': 0.0})
+        planet.planet_resources = initial_resources
         self.colonies[planet.name] = planet
         self.controlled_stars[star.name] = star
         self.stats['colonies_established'] += 1

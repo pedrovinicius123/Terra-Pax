@@ -3,7 +3,11 @@ import random
 import math
 
 from graphics.star import Planet, Star
-from graphics.planet_generator import generate_suitability_profile
+from graphics.planet_generator import (
+    generate_asteroid_suitability,
+    generate_gas_giant_suitability,
+    generate_suitability_profile,
+)
 
 
 def generate_traditional_star_name():
@@ -91,8 +95,62 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
         base_orbit = star_r * 1.5
         orbit_step = star_r * 0.35
 
+        def orbit_distance(k):
+            return base_orbit + k * orbit_step
+
+        # Cinturão de asteroides: uma órbita logo após a zona verde.
+        belt_k = None
+        belt_candidates = [
+            k for k in range(n_planets)
+            if orbit_distance(k) > star.green_zone * 1.1
+        ]
+        if belt_candidates and random.random() < 0.7:
+            belt_k = random.choice(belt_candidates[:3])
+
+        # Gigantes gasosos: fora do cinturão (ou da zona verde, sem ele).
+        gas_limit = star.green_zone * (2.2 if belt_k is not None else 1.6)
+
         for k in range(n_planets):
-            dist = base_orbit + k * orbit_step
+            dist = orbit_distance(k)
+
+            if k == belt_k:
+                n_asteroids = random.randint(5, 9)
+                belt_angle = random.uniform(0, 2 * math.pi)
+                for i in range(n_asteroids):
+                    angle = (belt_angle
+                             + i * 2 * math.pi / n_asteroids
+                             + random.uniform(-0.3, 0.3))
+                    px = pos[0] + dist * math.cos(angle)
+                    py = pos[1] + dist * math.sin(angle)
+                    p = Planet(
+                        n_planet_resources=0,
+                        developement=0,
+                        name=f"{star.name}-{planet_letters[k]}{i + 1}",
+                        abs_position=(px, py),
+                        planet_resources={},
+                        life_suitability=generate_asteroid_suitability(),
+                        production=1.2,
+                        distance_from_star=dist,
+                        is_colonized=False,
+                        radius=planet_r * random.uniform(0.3, 0.5),
+                        star_position=star.position,
+                        planet_type='asteroid',
+                    )
+                    p.post_init()
+                    p.parent_star = star
+                    star.planets.append(p)
+                continue
+
+            planet_type = 'gas_giant' if dist > gas_limit else 'terrestrial'
+            if planet_type == 'gas_giant':
+                suitability = generate_gas_giant_suitability()
+                radius = planet_r * random.uniform(1.9, 2.6)
+                production = 0.9
+            else:
+                suitability = generate_suitability_profile()
+                radius = planet_r * random.uniform(0.85, 1.15)
+                production = 1.0
+
             angle = random.uniform(0, 2 * math.pi)
             px = pos[0] + dist * math.cos(angle)
             py = pos[1] + dist * math.sin(angle)
@@ -103,14 +161,17 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
                 name=f"{star.name}-{planet_letters[k]}",
                 abs_position=(px, py),
                 planet_resources={},
-                life_suitability=generate_suitability_profile(),
-                production=1.0,
+                life_suitability=suitability,
+                production=production,
                 distance_from_star=dist,
                 is_colonized=False,
-                radius=planet_r,
-                star_position=star.position
+                radius=radius,
+                star_position=star.position,
+                planet_type=planet_type,
             )
             p.post_init()
+            p.has_rings = (planet_type == 'gas_giant'
+                           and random.random() < 0.4)
             p.parent_star = star
             star.planets.append(p)
 

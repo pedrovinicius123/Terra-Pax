@@ -5,3 +5,4 @@ dist/
 *.so
 *.o
 city_lights.jpeg
+tests
