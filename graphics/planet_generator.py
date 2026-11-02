@@ -174,9 +174,17 @@ def _asset_pixels(
 
 @lru_cache(maxsize=8)
 def generate_starfield_surface(size: tuple[int, int]) -> pygame.Surface:
-    """Scale and tint the NASA all-sky mosaic for the planet viewer backdrop."""
-    starfield = pygame.transform.smoothscale(
-        _load_asset_surface(_asset_for_layer("starfield", "global")), size)
+    """Scale and tint the NASA all-sky mosaic for the planet viewer backdrop.
+
+    The mosaic decodes to ~150 MB; it is loaded transiently and released here
+    rather than routed through the shared asset cache, so only the small
+    scaled backdrop stays resident. Output is identical to scaling the cached
+    source, since the source surface is never mutated.
+    """
+    filename = _asset_for_layer("starfield", "global")
+    source = pygame.image.load(str(ASSET_DIRECTORY / filename))
+    starfield = pygame.transform.smoothscale(source, size)
+    del source
     starfield.fill((95, 120, 165), special_flags=pygame.BLEND_RGB_MULT)
     starfield.set_alpha(220)
     return starfield
