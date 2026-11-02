@@ -157,8 +157,23 @@ class GameState:
                 except Exception as e:
                     print(f"[ctrl {f.name}] {e}")
 
+            # 6. Naves: IA cooperativa avançada um passo por tick.
+            self._step_ships()
+
             self._process_trade_income(dt)
             self._check_victory()
+
+    def _step_ships(self):
+        for f in self.factions:
+            if f.eliminated:
+                continue
+            for ship in list(f.ships.values()):
+                if not ship.alive:
+                    continue
+                try:
+                    ship.step()
+                except Exception as e:
+                    print(f"[ship {ship.ship_id}] {e}")
 
     def _process_trade_income(self, dt):
         trade_factor = 4.0 if self.victory_mode == "economic" else 1.0

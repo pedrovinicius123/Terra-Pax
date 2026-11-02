@@ -4,13 +4,6 @@ import math
 import random
 import networkx as nx
 
-# Cadência dos laços de espera das threads de nave. As posições são
-# interpoladas pelo getter abs_position a partir do relógio do jogo, então a
-# thread só precisa perceber chegada/ordem nesta granularidade — não a cada
-# quadro. Polling curto demais (20 ms) faz centenas de threads disputarem o
-# GIL e travar a renderização, sobretudo em 5x.
-SHIP_POLL = 0.12
-
 
 def _nearest_star(stars, px, py):
     """Estrela mais próxima de (px, py) por distância ao quadrado.
@@ -79,12 +72,19 @@ def point_at_distance(points, cum, length, travelled):
     return (x, y), heading
 
 
-class Ship(threading.Thread):
+class Ship:
+    """Nave conduzida por uma corrotina cooperativa, avançada pelo jogo.
+
+    Antes cada nave era uma `threading.Thread` com laço de polling; centenas
+    delas disputavam o GIL e travavam a renderização (pior em 5x). Agora a IA
+    é um gerador (`ai`) e o `GameState.tick` chama `step()` uma vez por quadro
+    de simulação. O `abs_position` segue paramétrico no relógio do jogo, e a
+    trava de movimento continua protegendo a leitura do quadro de render.
+    """
+
     def __init__(self, ship_id, faction, map_G, current_position, total_stars,
                  speed=5.0, hull=20.0, shields=0.0, weapons=0.0, cargo=0.0,
                  design_key="scout", **kwargs):
-        super().__init__()
-        self.daemon = True
         self.ship_id = ship_id
         self.design_key = design_key
         self.faction = faction
@@ -100,7 +100,7 @@ class Ship(threading.Thread):
         self._pinned = None
         self.heading = -math.pi / 2
         self.order = None
-        self._wake = threading.Event()
+        self._ai = None
 
         self.speed = max(0.1, speed)
         self.max_hull = float(hull)
@@ -159,7 +159,8 @@ class Ship(threading.Thread):
 
     @property
     def is_moving(self):
-        return self._voyage is not None
+        voyage = self._voyage
+        return voyage is not None and self._voyage_progress(voyage) < 1.0
 
     def _clock(self):
         state = getattr(self.faction, 'game_state', None)
@@ -201,22 +202,19 @@ class Ship(threading.Thread):
                 cum.append(cum[-1] + math.dist(points[index - 1],
                                                points[index]))
             length = cum[-1]
-            if length <= 1e-6:
-                self._voyage = None
-                self._position = list(points[-1])
-                self._pinned = None
-                self.current_position = destinations[-1]
-                return True
             effective = self.speed
             if speed_cap is not None:
                 effective = min(effective, max(0.1, float(speed_cap)))
+            # Uma viagem de comprimento zero também é registrada (duração 0):
+            # é assim que a estrela onde a nave já está recebe a chegada e a
+            # exploração/colonização corresponde.
             self._voyage = {
                 'points': points, 'cum': cum, 'length': length,
                 'destinations': destinations,
                 'arrivals': cum[1:],
                 'visited': set(),
                 'start': self._clock(),
-                'duration': length / (effective * TRAVEL_SCALE),
+                'duration': length / max(1e-9, effective * TRAVEL_SCALE),
             }
         if activity:
             self.activity = activity
@@ -231,13 +229,19 @@ class Ship(threading.Thread):
             self._pinned = position
 
     def wait_for_voyage(self, on_arrive=None):
-        """Aguarda o trajeto, disparando `on_arrive` ao passar por cada estrela.
+        """Corrotina: aguarda o trajeto, disparando `on_arrive` a cada estrela.
 
-        Retorna False quando a nave morreu, parou ou recebeu uma ordem.
+        Cede o controle (`yield`) a cada quadro de simulação até o voo
+        terminar. `on_arrive` é ela própria uma corrotina que devolve False
+        para abortar. Retorna False quando a nave morreu, parou ou recebeu
+        ordem.
         """
         while self.running and self.alive:
             voyage = self._voyage
             if voyage is None:
+                # Cede um quadro: chamar esta corrotina sem viagem não pode
+                # retornar instantaneamente, senão o laço de IA gira sem pausa.
+                yield
                 return True
             if self.order is not None:
                 return False
@@ -248,19 +252,21 @@ class Ship(threading.Thread):
                     if index in voyage['visited'] or eased < arrival - 1e-6:
                         continue
                     voyage['visited'].add(index)
-                    if on_arrive(voyage['destinations'][index]) is False:
+                    if (yield from on_arrive(
+                            voyage['destinations'][index])) is False:
                         return False
             if progress >= 1.0:
                 self._complete_voyage(voyage)
+                yield
                 return True
-            time.sleep(SHIP_POLL)
+            yield
         return False
 
     def travel_path(self, stars, on_arrive=None, activity=None,
                     speed_cap=None):
         if not self.start_voyage(stars, activity, speed_cap):
             return self.running and self.alive
-        return self.wait_for_voyage(on_arrive)
+        return (yield from self.wait_for_voyage(on_arrive))
 
     # ---------- ordens manuais ----------
     def issue_order(self, kind, star=None, planet=None, speed_cap=None):
@@ -272,15 +278,13 @@ class Ship(threading.Thread):
             self.stop_voyage()
         self.order = {'kind': kind, 'star': star, 'planet': planet,
                       'speed_cap': speed_cap}
-        self._wake.set()
         return True
 
     def clear_order(self):
         self.order = None
-        self._wake.set()
 
     def _handle_order(self):
-        """Executa uma ordem pendente. True quando ela foi atendida."""
+        """Corrotina: executa uma ordem pendente. True quando foi atendida."""
         order = self.order
         if order is None:
             return False
@@ -288,35 +292,44 @@ class Ship(threading.Thread):
         if kind == 'clear':
             self.clear_order()
             return False
-        # A ordem passa a ser a ação corrente: libera o trajeto para reagir
+        # A ordem passa a ser a ação corrente: libera o slot para reagir
         # a uma ordem seguinte.
         self.order = None
         if kind == 'hold':
             self.activity = "aguardando ordens"
             while self.running and self.alive and self.order is None:
-                time.sleep(SHIP_POLL)
-            self._wake.set()
+                yield
             return True
         star = order['star']
         self.activity = f"-> {star.name} (ordem)"
         path = self.find_path_to_star(star) or [star]
-        self.travel_path(path, speed_cap=order.get('speed_cap'))
-        self._wake.set()
+        yield from self.travel_path(path, speed_cap=order.get('speed_cap'))
         return True
 
-    def run(self):
+    def start(self):
+        """Instancia a corrotina de IA; chamada na criação da nave."""
         self.running = True
-        try:
-            self.tick()
-        except Exception as e:
-            print(f"[{self.ship_id}] erro: {e}")
+        self._ai = self.ai()
 
-    def tick(self):
+    def step(self):
+        """Avança a IA um quadro de simulação (chamada pelo GameState)."""
+        if self._ai is None or not self.running or not self.alive:
+            return
+        try:
+            next(self._ai)
+        except StopIteration:
+            self.running = False
+            self._ai = None
+
+    def ai(self):
         while self.running and self.alive:
-            time.sleep(1)
+            if (yield from self._handle_order()):
+                continue
+            yield
 
     # ---------- utilidades de tempo-de-jogo ----------
     def _wait_game_time(self, seconds):
+        """Corrotina: espera `seconds` de relógio de jogo, cedendo a cada quadro."""
         t0 = self._clock()
         if getattr(self.faction, 'game_state', None) is None:
             time.sleep(seconds)
@@ -324,7 +337,7 @@ class Ship(threading.Thread):
         while self.running and self.alive and self.order is None:
             if self._clock() - t0 >= seconds:
                 return
-            time.sleep(SHIP_POLL)
+            yield
 
     # ---------- movimento controlado pelo relógio global ----------
     def move_to_star(self, from_star, to_star):
@@ -333,7 +346,7 @@ class Ship(threading.Thread):
         if self.current_position is to_star and self._voyage is None:
             return
         self.activity = f"-> {to_star.name}"
-        self.travel_path([to_star])
+        yield from self.travel_path([to_star])
         if not self.running or not self.alive:
             return
         self.current_position = to_star
@@ -374,21 +387,21 @@ class Scout(Ship):
         super().__init__(**kwargs)
         self.scan_time = float(scan_time)
 
-    def tick(self):
+    def ai(self):
         if self.faction.scout_manager:
             self.faction.scout_manager.register_scout(self.ship_id, self)
 
         while self.running and self.alive:
-            if self._handle_order():
+            if (yield from self._handle_order()):
                 continue
             target = self._pick_unexplored()
             if target is None:
                 self.activity = "sem alvos"
-                self._wait_game_time(3)
+                yield from self._wait_game_time(3)
                 continue
             path = self.find_path_to_star(target) or [target]
             self.activity = f"-> {target.name}"
-            if not self.travel_path(path, on_arrive=self._scan):
+            if not (yield from self.travel_path(path, on_arrive=self._scan)):
                 if not self.running or not self.alive:
                     return
                 continue
@@ -398,7 +411,7 @@ class Scout(Ship):
         if star.name in self.faction.explored_stars:
             return True
         self.activity = f"explorando {star.name}"
-        self._wait_game_time(self.scan_time)
+        yield from self._wait_game_time(self.scan_time)
         self.faction.explored_stars.add(star.name)
         return self.running and self.alive and self.order is None
 
@@ -425,7 +438,6 @@ class ColonyShip(Ship):
         self.target_star = star
         self.target_planet = planet
         self.activity = f"-> {planet.name}"
-        self._wake.set()
         return True
 
     def _release_target(self):
@@ -433,7 +445,6 @@ class ColonyShip(Ship):
             self.faction.reserved_targets.discard(self.target_planet.name)
         self.target_star = None
         self.target_planet = None
-        self._wake.clear()
 
     def destroy(self):
         if self.target_planet is not None and self.faction is not None:
@@ -442,19 +453,15 @@ class ColonyShip(Ship):
             self.target_star = None
         super().destroy()
 
-    def tick(self):
+    def ai(self):
         while self.running and self.alive:
-            if self._handle_order():
+            if (yield from self._handle_order()):
                 continue
-            if not self._wake.wait(0.5):
-                continue
-            self._wake.clear()
-            if not self.running or not self.alive:
-                return
 
             tgt_star = self.target_star
             tgt_planet = self.target_planet
             if tgt_star is None or tgt_planet is None:
+                yield
                 continue
 
             if tgt_planet.is_colonized:
@@ -462,10 +469,10 @@ class ColonyShip(Ship):
                 return
 
             path = self.find_path_to_star(tgt_star) or [tgt_star]
-            if not self.travel_path(path, activity=f"-> {tgt_planet.name}"):
+            if not (yield from self.travel_path(
+                    path, activity=f"-> {tgt_planet.name}")):
                 if not self.running or not self.alive:
                     return
-                self._wake.set()
                 continue
 
             if not self.running or not self.alive:
@@ -479,7 +486,6 @@ class ColonyShip(Ship):
             if self.faction.establish_colony(tgt_star, tgt_planet):
                 self.destroy()
                 return
-            
 
 
 class Transport(Ship):
@@ -623,7 +629,7 @@ class Transport(Ship):
         path = self.find_path_to_star(planet.parent_star)
         if path is None:
             return False
-        return self.travel_path(path)
+        return (yield from self.travel_path(path))
 
     def _clear_mission(self, completed=False):
         self.load = 0.0
@@ -634,9 +640,9 @@ class Transport(Ship):
         if completed:
             self._prefer_population = not self._prefer_population
 
-    def tick(self):
+    def ai(self):
         while self.running and self.alive:
-            if self._handle_order():
+            if (yield from self._handle_order()):
                 continue
             logistics = self.faction.logistics_manager
             has_cargo = (
@@ -661,7 +667,7 @@ class Transport(Ship):
                     )
                 mission_kind, route = mission
                 if route is None:
-                    self._wait_game_time(3)
+                    yield from self._wait_game_time(3)
                     continue
 
                 if mission_kind == 'population':
@@ -677,11 +683,11 @@ class Transport(Ship):
                     if self.mission_kind == 'population'
                     else f"indo buscar {self.resource}"
                 )
-                if not self._travel_to_planet(source):
+                if not (yield from self._travel_to_planet(source)):
                     if not self.running or not self.alive:
                         return
                     self._clear_mission()
-                    self._wait_game_time(3)
+                    yield from self._wait_game_time(3)
                     continue
                 loaded = (
                     self._load_population(source, amount)
@@ -690,7 +696,7 @@ class Transport(Ship):
                 )
                 if not loaded:
                     self._clear_mission()
-                    self._wait_game_time(1)
+                    yield from self._wait_game_time(1)
                     continue
 
             destination = self.destination
@@ -702,7 +708,7 @@ class Transport(Ship):
                     destination = logistics.plan_delivery(
                         self.resource, self.load, origin=self.source)
                 if destination is None:
-                    self._wait_game_time(3)
+                    yield from self._wait_game_time(3)
                     continue
                 self.destination = destination
 
@@ -711,11 +717,11 @@ class Transport(Ship):
                 if self.mission_kind == 'population'
                 else f"transportando {self.resource}"
             )
-            if not self._travel_to_planet(destination):
+            if not (yield from self._travel_to_planet(destination)):
                 if not self.running or not self.alive:
                     return
                 self.destination = None
-                self._wait_game_time(3)
+                yield from self._wait_game_time(3)
                 continue
             delivered = (
                 self._deliver_population(destination)
@@ -724,7 +730,7 @@ class Transport(Ship):
             )
             if delivered <= 0:
                 self.destination = None
-                self._wait_game_time(1)
+                yield from self._wait_game_time(1)
                 continue
 
             remaining = (
@@ -741,40 +747,41 @@ class Transport(Ship):
                 self._clear_mission(completed=True)
             else:
                 self.destination = None
-            self._wait_game_time(1)
+            yield from self._wait_game_time(1)
 
 
 class Warship(Ship):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def tick(self):
+    def ai(self):
         while self.running and self.alive:
             if self.shields < self.max_shields:
                 self.shields = min(self.max_shields,
                                    self.shields + self.max_shields * 0.02)
-            if self._handle_order():
+            if (yield from self._handle_order()):
                 continue
             target = self._pick_enemy_star()
             if target is not None:
                 path = self.find_path_to_star(target) or [target]
-                if not self.travel_path(path, activity=f"-> {target.name}"):
+                if not (yield from self.travel_path(
+                        path, activity=f"-> {target.name}")):
                     if not self.running or not self.alive:
                         return
                     continue
-                self._wait_game_time(2)
+                yield from self._wait_game_time(2)
                 continue
             patrol = list(self.faction.controlled_stars.values())
             if patrol:
                 dest = random.choice(patrol)
                 if dest is not self.current_position:
                     path = self.find_path_to_star(dest)
-                    if path and not self.travel_path(
-                            path, activity=f"patrulhando {dest.name}"):
+                    if path and not (yield from self.travel_path(
+                            path, activity=f"patrulhando {dest.name}")):
                         if not self.running or not self.alive:
                             return
                         continue
-            self._wait_game_time(2)
+            yield from self._wait_game_time(2)
 
     def _pick_enemy_star(self):
         try:

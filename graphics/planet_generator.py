@@ -31,6 +31,10 @@ GAIA_GIANT_LIGHT = (158, 206, 178)
 GAIA_GIANT_DARK = (58, 116, 118)
 GAIA_GIANT_STORM = (226, 244, 226)
 
+# Resolução real do campo de ruído dos mundos terrestres. Acima disso a
+# textura é apenas interpolação do mesmo conteúdo.
+FIELD_CAP = (768, 384)
+
 
 def barren_palette(seed: str) -> tuple[tuple[int, int, int], ...]:
     """(planície, alto, bacia seca) de um mundo sem vida."""
@@ -55,7 +59,7 @@ def _mix_rgb(left: tuple[int, int, int], right: tuple[int, int, int],
     """Blend two RGB triples; ratio 0 devolve a esquerda, 1 a direita."""
     ratio = min(1.0, max(0.0, ratio))
     return tuple(
-        int(round(left[axis] * (1.0 - ratio) + right[axis] * ratio))
+        round(left[axis] * (1.0 - ratio) + right[axis] * ratio)
         for axis in range(3))
 
 
@@ -156,7 +160,7 @@ def _asset_for_layer(layer: str, seed: str) -> str:
     return assets[index]
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=16)
 def _load_asset_surface(filename: str) -> pygame.Surface:
     path = ASSET_DIRECTORY / filename
     if not path.is_file():
@@ -164,7 +168,7 @@ def _load_asset_surface(filename: str) -> pygame.Surface:
     return pygame.image.load(str(path))
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=64)
 def _asset_pixels(
         filename: str, size: tuple[int, int]) -> np.ndarray:
     image = pygame.transform.smoothscale(
@@ -172,7 +176,7 @@ def _asset_pixels(
     return np.transpose(pygame.surfarray.array3d(image), (1, 0, 2))
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=4)
 def generate_starfield_surface(size: tuple[int, int]) -> pygame.Surface:
     """Scale and tint the NASA all-sky mosaic for the planet viewer backdrop.
 
@@ -248,43 +252,70 @@ def _sphere_coordinates(
 def _spherical_value_noise(
         x: np.ndarray, y: np.ndarray, z: np.ndarray,
         grid_size: int, generator: np.random.Generator) -> np.ndarray:
-    lattice = generator.random(
-        (grid_size, grid_size, grid_size), dtype=np.float32)
-    coordinates = [
-        (component + 1.0) * (0.5 * grid_size)
-        for component in (x, y, z)
-    ]
-    floors = [np.floor(axis).astype(np.int32) for axis in coordinates]
-    fractions = [axis - floor for axis, floor in zip(coordinates, floors)]
-    blends = [
-        fraction * fraction * (3.0 - 2.0 * fraction)
-        for fraction in fractions
-    ]
-    x0, y0, z0 = (floor % grid_size for floor in floors)
-    x1, y1, z1 = (
-        (floor + 1) % grid_size for floor in floors)
-    blend_x, blend_y, blend_z = blends
+    """Interpolação trilinear determinística sobre uma grade esférica.
 
-    corners = [
-        lattice[zi, yi, xi]
-        for zi, yi, xi in (
-            (z0, y0, x0), (z0, y0, x1),
-            (z0, y1, x0), (z0, y1, x1),
-            (z1, y0, x0), (z1, y0, x1),
-            (z1, y1, x0), (z1, y1, x1),
-        )
-    ]
-    near = (
-        corners[0] * (1.0 - blend_x) + corners[1] * blend_x
-    ) * (1.0 - blend_y) + (
-        corners[2] * (1.0 - blend_x) + corners[3] * blend_x
-    ) * blend_y
-    far = (
-        corners[4] * (1.0 - blend_x) + corners[5] * blend_x
-    ) * (1.0 - blend_y) + (
-        corners[6] * (1.0 - blend_x) + corners[7] * blend_x
-    ) * blend_y
-    return near * (1.0 - blend_z) + far * blend_z
+    Mesma aritmética da versão direta (coordenada -> piso -> blend -> 8
+    cantos -> trilinear), mas escrita com `out=` sobre alguns buffers: o
+    campo tem centenas de milhares de pixels e a versão alocava ~60 arrays
+    temporários por chamada, o que dominava o custo de gerar um planeta.
+    """
+    lattice = generator.random(
+        (grid_size, grid_size, grid_size), dtype=np.float32).reshape(-1)
+    scale = 0.5 * grid_size
+    shape = x.shape
+    plane = grid_size * grid_size
+
+    axes = []
+    for component in (x, y, z):
+        coordinate = np.multiply(np.add(component, 1.0), scale)
+        floored = np.floor(coordinate)
+        fraction = np.subtract(coordinate, floored)
+        blend = np.multiply(
+            np.multiply(fraction, fraction),
+            np.subtract(3.0, np.multiply(2.0, fraction)))
+        floor = floored.astype(np.int32)
+        axes.append((np.mod(floor, grid_size),
+                     np.mod(np.add(floor, 1), grid_size),
+                     blend, np.subtract(1.0, blend)))
+    x_low, x_high, blend_x, one_minus_x = axes[0]
+    y_low, y_high, blend_y, one_minus_y = axes[1]
+    z_low, z_high, blend_z, one_minus_z = axes[2]
+
+    z_low_offset = np.multiply(z_low, plane)
+    z_high_offset = np.multiply(z_high, plane)
+    y_low_offset = np.multiply(y_low, grid_size)
+    y_high_offset = np.multiply(y_high, grid_size)
+    corner_index = np.empty(shape, dtype=np.int32)
+    planes = [np.empty(shape, dtype=np.float32) for _ in range(4)]
+    near, far, left, right = planes
+
+    def corner(base, x_index, out):
+        np.add(base, x_index, out=corner_index)
+        np.take(lattice, corner_index, out=out)
+
+    def blend_plane(base_low, base_high, out):
+        corner(base_low, x_low, out)
+        np.multiply(out, one_minus_x, out=out)
+        corner(base_low, x_high, left)
+        np.multiply(left, blend_x, out=left)
+        np.add(out, left, out=out)
+        np.multiply(out, one_minus_y, out=out)
+        corner(base_high, x_low, left)
+        np.multiply(left, one_minus_x, out=left)
+        corner(base_high, x_high, right)
+        np.multiply(right, blend_x, out=right)
+        np.add(left, right, out=left)
+        np.multiply(left, blend_y, out=left)
+        np.add(out, left, out=out)
+
+    for z_offset, plane_out in ((z_low_offset, near), (z_high_offset, far)):
+        blend_plane(np.add(z_offset, y_low_offset),
+                    np.add(z_offset, y_high_offset), plane_out)
+
+    np.multiply(near, one_minus_z, out=near)
+    np.multiply(far, blend_z, out=far)
+    np.add(near, far, out=near)
+    return near
 
 
 def _resize_scalar_field(
@@ -321,12 +352,12 @@ def _resize_scalar_field(
     return upper * (1.0 - blend_y[:, None]) + lower * blend_y[:, None]
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=32)
 def _planet_fields(
         seed: str, size: tuple[int, int], detail_level: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     width, height = size
-    field_size = (min(width, 768), min(height, 384))
+    field_size = (min(width, FIELD_CAP[0]), min(height, FIELD_CAP[1]))
     x, y, z = _sphere_coordinates(field_size)
     warp_generator = np.random.default_rng(
         _stable_seed(f"{seed}:continent-warp"))
@@ -391,6 +422,7 @@ def _planet_fields(
     return continent, land_mask, terrain, latitude
 
 
+@lru_cache(maxsize=256)
 def generate_planet_land_mask(
         seed: str, size: tuple[int, int] = (256, 128),
         detail_level: int = 3) -> np.ndarray:
@@ -460,6 +492,15 @@ def _settlement_site_weights(
 def generate_city_light_texture(
         suitability: Mapping[str, float], seed: str,
         size: tuple[int, int], detail_level: int = 3) -> pygame.Surface:
+    """Create seeded city clusters and roads restricted to procedural land."""
+    return _city_light_texture(
+        dominant_suitability(suitability), seed, size, detail_level)
+
+
+@lru_cache(maxsize=64)
+def _city_light_texture(
+        suitability_type: str, seed: str,
+        size: tuple[int, int], detail_level: int) -> pygame.Surface:
     """Create seeded city clusters and roads restricted to procedural land."""
     width, height = size
     if width < 32 or height < 16:
@@ -533,8 +574,7 @@ def generate_city_light_texture(
             np.maximum(local, cluster * 255.0, out=local)
             light_strength[np.ix_(y_indices, x_indices)] = local
 
-    _, _, highlights = SUITABILITY_STYLES[
-        dominant_suitability(suitability)]
+    _, _, highlights = SUITABILITY_STYLES[suitability_type]
     color = np.asarray((255, 178, 92), dtype=np.float32) * 0.82 + (
         np.asarray(highlights, dtype=np.float32) * 0.18)
     city = pygame.Surface((width, height), pygame.SRCALPHA)
@@ -700,7 +740,7 @@ def generate_habitat_light_texture(
         else:
             center_y = generator.randrange(height)
             sigma = generator.uniform(0.8, 1.8)
-        half = max(2, int(math.ceil(sigma * 3.0)))
+        half = max(2, math.ceil(sigma * 3.0))
         offsets = np.arange(-half, half + 1)
         yy = np.clip(center_y + offsets, 0, height - 1)
         xx = (center_x + offsets) % width
@@ -1265,7 +1305,7 @@ def generate_gas_giant_surface(
             min(radius * 1.2, size * 0.47 - 2), int(habitats), size)
     return composed
 
-
+@lru_cache(maxsize=256)
 def generate_asteroid_surface(
         seed: str, size: int = 64, detail_level: int = 3,
         city_lights: float = 0.0, habitats: int = 0,

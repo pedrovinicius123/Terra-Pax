@@ -158,6 +158,7 @@ class Planet:
         self.focus = 'balanced'
         self.build_queue = []
         self.building_task = None
+        self.active_ship_builds = []
         self.defense = 0.0
         self.max_defense = 100.0
         self.has_rings = False
@@ -413,7 +414,23 @@ class Planet:
         self._advance_expansion(years, wonder_bonus)
 
         self.const()
+        self._advance_ship_builds()
         self.produce(step_scale)
+
+    def _advance_ship_builds(self):
+        """Conclui obras de nave cujo prazo (em tempo de jogo) venceu."""
+        if not self.active_ship_builds:
+            return
+        game_state = getattr(self.faction, 'game_state', None)
+        if game_state is None:
+            return
+        now = game_state.time
+        for task in list(self.active_ship_builds):
+            if task.get('cancelled'):
+                self.active_ship_builds.remove(task)
+                continue
+            if now >= task.get('build_deadline', now):
+                self._build_ship(task)
 
     def can_afford(self, cost: Dict[str, float]) -> bool:
         for resource, amount in cost.items():
@@ -495,8 +512,15 @@ class Planet:
             threading.Thread(target=self._build_habitat, args=(task,),
                              daemon=True).start()
             return
-        threading.Thread(target=self._build_ship, args=(task,),
-                         daemon=True).start()
+        # Construção de nave: concluída pelo relógio do jogo em develop(),
+        # não por uma thread que dorme build_time e disputa o GIL.
+        state = getattr(self.faction, 'game_state', None)
+        if state is None:
+            self._build_ship(task)
+            return
+        task['build_deadline'] = task['started_at'] + float(
+            task.get('build_time', 5))
+        self.active_ship_builds.append(task)
 
     def _finish_task(self, task):
         """Esquece a obra concluída para o painel não mostrá-la como ativa."""
@@ -542,15 +566,6 @@ class Planet:
         except Exception:
             return
         try:
-            build_time = float(task.get('build_time', 5))
-            state = getattr(self.faction, 'game_state', None)
-            if state is not None:
-                t0 = state.time
-                while state.time - t0 < build_time:
-                    time.sleep(0.05)
-            else:
-                time.sleep(build_time)
-
             if self.faction is None or self.faction.eliminated:
                 return
 
@@ -584,6 +599,8 @@ class Planet:
         except Exception as e:
             print(f"[{self.name}] erro construindo: {e}")
         finally:
+            if task in self.active_ship_builds:
+                self.active_ship_builds.remove(task)
             self._finish_task(task)
 
     def produce(self, step_scale: float = 1.0):

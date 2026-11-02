@@ -1,6 +1,7 @@
 import random
 import pygame
 import sys
+import traceback
 
 from graphics.generate_map import init_map
 from players.factions import Faction, FactionType
@@ -224,8 +225,8 @@ def main():
                 break
 
         pygame.quit()
-    except Exception as err:
-        print(err)
+    except Exception:
+        print(traceback.format_exc())
         sys.exit()
 
 

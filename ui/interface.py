@@ -1,5 +1,7 @@
 import math
 import random
+import time
+
 import numpy as np
 import pygame
 
@@ -255,8 +257,13 @@ class GameUI:
         self.log = []
         self._planet_surfaces = {}
         self._map_planet_surfaces = {}
+        self._planet_placeholders = {}
+        self._planet_pending = {}
+        self._camera_key = None
+        self._camera_still = 0
         self._belt_speck_cache = {}
         self._ship_sprite_cache = {}
+        self._ship_base_cache = {}
         self.planet_viewer = None
         self._last_event_idx = 0
         self._top_buttons = []
@@ -396,6 +403,7 @@ class GameUI:
         self.texture_detail = value
         self._planet_surfaces.clear()
         self._map_planet_surfaces.clear()
+        self._planet_pending.clear()
         if self.planet_viewer is not None:
             self.planet_viewer.set_detail_level(value)
 
@@ -1553,6 +1561,7 @@ class GameUI:
                 self.zoom = self.DEFAULT_ZOOM
                 self._center_map_on_galaxy()
                 self._map_planet_surfaces.clear()
+                self._planet_placeholders.clear()
             elif event.key == pygame.K_v:
                 self._open_planet_viewer()
 
@@ -1563,6 +1572,7 @@ class GameUI:
         self.zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM,
                          self.zoom * (1.2 if direction > 0 else 1 / 1.2)))
         self._map_planet_surfaces.clear()
+        self._planet_placeholders.clear()
         self.off_x = wx - (pos[0] - self.W / 2) / self.zoom
         self.off_y = wy - (pos[1] - self.H / 2) / self.zoom
 
@@ -1718,6 +1728,7 @@ class GameUI:
                 self.screen, self.selected_planet, self.f_title, self.f_small)
         if self.state.game_over:
             self._draw_victory()
+        self._drain_planet_textures()
 
     def _draw_victory(self):
         overlay = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
@@ -2095,13 +2106,27 @@ class GameUI:
         key = (filename, color, size, index)
         sprite = self._ship_sprite_cache.get(key)
         if sprite is None:
-            base = get_ship_sprite(filename, color, (size, size))
+            base = self._ship_base_sprite(filename, color, size)
             sprite = (base if index == 0
                       else pygame.transform.rotate(base, index * step))
             if len(self._ship_sprite_cache) > 768:
                 self._ship_sprite_cache.clear()
             self._ship_sprite_cache[key] = sprite
         return sprite
+
+    def _ship_base_sprite(self, filename, color, size):
+        """Base descascada (sem rotação), mantida para sempre.
+
+        O cache de sprites rotacionados é limpo quando cresce demais porque o
+        tamanho depende do zoom; sem este cache, cada limpeza voltaria a ler o
+        PNG do disco e a tiñá-lo com numpy durante o quadro.
+        """
+        key = (filename, color, size)
+        base = self._ship_base_cache.get(key)
+        if base is None:
+            base = get_ship_sprite(filename, color, (size, size))
+            self._ship_base_cache[key] = base
+        return base
 
     def _draw_ship_sprite(self, ship, selected):
         sx, sy = self.world_to_screen(*ship.abs_position)
@@ -2425,7 +2450,8 @@ class GameUI:
                 ),
             )
 
-    def _planet_surface(self, planet, size):
+    def _planet_texture_request(self, planet, size):
+        """Chave de cache e argumentos do gerador para um mundo e tamanho."""
         suitability = tuple(sorted(planet.life_suitability.items()))
         capacity = planet.capacity_info()
         lights = round(city_light_intensity(
@@ -2438,34 +2464,107 @@ class GameUI:
             planet, 'terraforming_stage', lambda: 1.0)(), 2)
         key = (id(planet), suitability, size, lights, self.texture_detail,
                planet_type, rings, habitats, greening)
-        if key not in self._planet_surfaces:
-            star_name = (planet.parent_star.name
-                         if planet.parent_star is not None else '')
-            seed = f"{star_name}:{planet.name}"
-            self._planet_surfaces[key] = generate_planet_surface(
-                planet.life_suitability, seed, size, city_lights=lights,
-                detail_level=self.texture_detail, planet_type=planet_type,
-                rings=rings, habitats=habitats, greening=greening)
-        return self._planet_surfaces[key]
+        return key, dict(city_lights=lights, detail_level=self.texture_detail,
+                         planet_type=planet_type, rings=rings,
+                         habitats=habitats, greening=greening)
+
+    def _generate_planet_surface(self, planet, size):
+        _, options = self._planet_texture_request(planet, size)
+        star_name = (planet.parent_star.name
+                     if planet.parent_star is not None else '')
+        seed = f"{star_name}:{planet.name}"
+        return generate_planet_surface(planet.life_suitability, seed, size,
+                                       **options)
+
+    def _planet_surface(self, planet, size):
+        key, _ = self._planet_texture_request(planet, size)
+        surface = self._planet_surfaces.get(key)
+        if surface is None:
+            surface = self._generate_planet_surface(planet, size)
+            self._planet_surfaces[key] = surface
+        return surface
+
+    def _provisional_planet_surface(self, planet, wanted):
+        """Melhor textura já gerada para o mesmo estado do mundo, ou None.
+
+        O disco em si é barato; o que pesa é o traçado procedural. Enquanto a
+        resolução do bucket estiver na fila, um bucket vizinho segura o lugar
+        na tela; sem nenhum, `_placeholder_planet_surface` segura.
+        """
+        best_size = None
+        best_surface = None
+        for key, surface in self._planet_surfaces.items():
+            if key[:2] != wanted[:2] or key[3:] != wanted[3:]:
+                continue
+            if best_size is None or abs(
+                    key[2] - wanted[2]) < abs(best_size - wanted[2]):
+                best_size, best_surface = key[2], surface
+        return best_surface
+
+    def _placeholder_planet_surface(self, planet, size):
+        color = self._planet_color(planet)
+        key = (id(planet), size, color)
+        cached = self._planet_placeholders.get(key)
+        if cached is None:
+            cached = pygame.Surface((size, size), pygame.SRCALPHA)
+            pygame.draw.circle(cached, color, (size // 2, size // 2),
+                               max(1, size // 2))
+            self._planet_placeholders[key] = cached
+        return cached
+
+    def _queued_planet_surface(self, planet, size):
+        """Textura do bucket do mapa, gerada em quadro parado se faltar."""
+        key, _ = self._planet_texture_request(planet, size)
+        surface = self._planet_surfaces.get(key)
+        if surface is not None:
+            return surface
+        self._planet_pending[key] = (planet, size)
+        return self._provisional_planet_surface(planet, key)
+
+    def _drain_planet_textures(self):
+        """Gera as texturas adiadas quando a câmera parou de se mover."""
+        if not self._planet_pending:
+            return
+        signature = (round(self.zoom, 4), round(self.off_x, 1),
+                     round(self.off_y, 1))
+        if signature != self._camera_key:
+            self._camera_key = signature
+            self._camera_still = 0
+            return
+        self._camera_still += 1
+        if self._camera_still < 2:
+            return
+        deadline = time.perf_counter() + 0.05
+        for key, (planet, size) in list(self._planet_pending.items()):
+            self._planet_pending.pop(key, None)
+            if key in self._planet_surfaces:
+                continue
+            self._planet_surfaces[key] = self._generate_planet_surface(
+                planet, size)
+            # O disco provisório virou obsoleto junto com a fila.
+            self._map_planet_surfaces = {
+                map_key: surface
+                for map_key, surface in self._map_planet_surfaces.items()
+                if map_key[0] != id(planet)
+            }
+            if time.perf_counter() > deadline:
+                break
 
     def _map_planet_surface(self, planet, size):
-        suitability = tuple(sorted(planet.life_suitability.items()))
-        capacity = planet.capacity_info()
-        lights = round(city_light_intensity(
-            planet.developement, planet.population,
-            capacity['max_dev'], capacity['max_pop'],), 2)
-        key = (id(planet), suitability, size, lights, self.texture_detail,
-               planet_type_of(planet), bool(getattr(planet, 'has_rings',
-                                                   False)),
-               int(getattr(planet, 'habitats', 0)),
-               round(getattr(planet, 'terraforming_stage', lambda: 1.0)(), 2))
-        if key not in self._map_planet_surfaces:
-            render_size = min(512, max(64, 1 << (size - 1).bit_length()))
-            surface = self._planet_surface(planet, render_size)
-            self._map_planet_surfaces[key] = (
-                surface if surface.get_size() == (size, size)
-                else pygame.transform.smoothscale(surface, (size, size)))
-        return self._map_planet_surfaces[key]
+        key, _ = self._planet_texture_request(planet, size)
+        cached = self._map_planet_surfaces.get(key)
+        if cached is not None:
+            return cached
+        render_size = min(512, max(64, 1 << (size - 1).bit_length()))
+        surface = self._queued_planet_surface(planet, render_size)
+        if surface is None:
+            placeholder = self._placeholder_planet_surface(planet, size)
+            self._map_planet_surfaces[key] = placeholder
+            return placeholder
+        scaled = (surface if surface.get_size() == (size, size)
+                  else pygame.transform.smoothscale(surface, (size, size)))
+        self._map_planet_surfaces[key] = scaled
+        return scaled
 
     def _draw_log(self):
         if not self.log:
