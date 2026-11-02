@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Tuple, Dict, List
 from queue import Queue, Empty
+import math
 import threading
 import time
 
@@ -46,10 +47,39 @@ TERRAFORM_PRODUCTION_GAIN = 1.08
 # ano de jogo conforme a colônia se expande (desenvolvimento + população).
 TERRAFORM_RATE_MIN = 0.2
 TERRAFORM_RATE_MAX = 3.0
+# Mundos naturalmente habitáveis já nasceram metade do caminho: cada ponto
+# de habitabilidade natural acelera a terraformação da colônia.
+TERRAFORM_HABITABILITY_GAIN = 1.5
+
+# Retrato do planeta: 0 = rocha estéril, 1 = Gaia.
+GREENING_BASE = 0.18
+GREENING_SUIT_WEIGHT = 0.42
+GREENING_EXPANSION_WEIGHT = 0.40
+
+# Foco de cada colônia: como o esforço local é distribuído.
+COLONY_FOCUSES = ('balanced', 'industry', 'growth', 'defense', 'science')
+FOCUS_EFFECTS = {
+    'balanced': {},
+    'industry': {'development': 1.30, 'output': 1.15, 'population': 0.85},
+    'growth': {'population': 1.35, 'development': 0.85},
+    'defense': {'defense': 3.0, 'development': 0.90, 'population': 0.95},
+    'science': {'research': 1.30, 'output': 0.90},
+}
+FOCUS_LABELS = {
+    'balanced': 'Equilibrado', 'industry': 'Indústria',
+    'growth': 'Crescimento', 'defense': 'Defesa', 'science': 'Ciência',
+}
+
 
 def terraform_years_needed(tier: int) -> float:
     """Anos de progresso necessários para sair do `tier` atual."""
     return TERRAFORM_BASE_YEARS * TERRAFORM_TIER_FACTOR ** max(0, tier)
+
+
+def greening_from_suitability(suitability) -> float:
+    """Retrato mínimo de um mundo apenas pela sua habitabilidade natural."""
+    best = max(suitability.values(), default=0.0) if suitability else 0.0
+    return min(1.0, max(0.0, GREENING_BASE + GREENING_SUIT_WEIGHT * best))
 
 
 # 1 unidade de população = 1 milhão de habitantes. A produção é obra do
@@ -121,6 +151,13 @@ class Planet:
         self.terraform_progress = 0.0
         self.max_terraform_level = TYPE_MAX_TERRAFORM.get(
             self.planet_type, 6)
+        # Habitabilidade natural, capturada antes de qualquer ganho de nível:
+        # define quanto mais rápido um mundo já habitável chega a Gaia.
+        self.base_suitability = max(
+            self.life_suitability.values(), default=0.0)
+        self.focus = 'balanced'
+        self.build_queue = []
+        self.building_task = None
         self.defense = 0.0
         self.max_defense = 100.0
         self.has_rings = False
@@ -173,23 +210,103 @@ class Planet:
         level = int(getattr(self, 'terraform_level', 0))
         max_level = int(getattr(self, 'max_terraform_level', 6))
         progress = float(getattr(self, 'terraform_progress', 0.0))
+        rate = self.expansion_rate()
         if level >= max_level:
             return {'level': level, 'max': max_level, 'years_left': 0.0,
-                    'percent': 1.0, 'needed': 0.0}
+                    'percent': 1.0, 'needed': 0.0, 'rate': rate,
+                    'eta_years': 0.0}
         needed = terraform_years_needed(level)
+        remaining = max(0.0, needed - progress)
         return {'level': level, 'max': max_level,
-                'years_left': max(0.0, needed - progress),
-                'percent': min(1.0, progress / needed), 'needed': needed}
+                'years_left': remaining,
+                'percent': min(1.0, progress / needed), 'needed': needed,
+                'rate': rate,
+                'eta_years': (remaining / rate) if rate > 0 else float('inf')}
+
+    def expansion_rate(self) -> float:
+        """Anos de progresso terraformador por ano de jogo, no mundo atual."""
+        ratio = self.expansion_ratio()
+        return ((TERRAFORM_RATE_MIN
+                 + (TERRAFORM_RATE_MAX - TERRAFORM_RATE_MIN) * ratio)
+                * self.habitability_factor())
+
+    def habitability_factor(self) -> float:
+        """Mundos já habitáveis terraformam mais rápido."""
+        return 1.0 + TERRAFORM_HABITABILITY_GAIN * min(
+            1.0, max(0.0, float(getattr(self, 'base_suitability', 0.0))))
+
+    def terraforming_stage(self) -> float:
+        """Retrato do mundo: 0 = rocha estéril, 1 = Gaia."""
+        max_level = max(1, int(getattr(self, 'max_terraform_level', 6)))
+        level = min(int(getattr(self, 'terraform_level', 0)), max_level)
+        if level >= max_level:
+            tier = 1.0
+        else:
+            needed = terraform_years_needed(level)
+            tier = (level + min(
+                1.0, float(getattr(self, 'terraform_progress', 0.0))
+                / max(1e-6, needed))) / max_level
+        suit = max(self.life_suitability.values(), default=0.0)
+        return min(1.0, max(0.0, GREENING_BASE
+                            + GREENING_SUIT_WEIGHT * suit
+                            + GREENING_EXPANSION_WEIGHT * tier))
+
+    def focus_effects(self) -> dict:
+        return FOCUS_EFFECTS.get(getattr(self, 'focus', 'balanced'), {})
+
+    def set_focus(self, focus) -> bool:
+        if focus not in COLONY_FOCUSES:
+            return False
+        self.focus = focus
+        return True
+
+    def growth_projection(self) -> dict:
+        """Projeção simples de crescimento para o planejador de colônias."""
+        max_dev, max_pop = self._compute_caps()
+        effects = self.focus_effects()
+        growth_rate = 0.03 * effects.get('population', 1.0)
+        if self.faction is not None:
+            growth_rate *= self.faction.population_growth_multiplier
+        growth_rate *= 1.0 - 0.75 * getattr(self, 'famine', 0.0)
+        headroom_pop = max(0.0, max_pop - self.population)
+        years_to_cap = float('inf')
+        if growth_rate > 0 and 0 < self.population < max_pop:
+            years_to_cap = (math.log(max_pop / self.population)
+                            / math.log(1.0 + growth_rate))
+        return {
+            'max_pop': max_pop, 'max_dev': max_dev,
+            'pop_growth_rate': growth_rate,
+            'years_to_pop_cap': years_to_cap,
+            'pop_headroom': headroom_pop,
+            'food_balance': self.food_balance(),
+        }
+
+    def food_balance(self) -> float:
+        """Alimento produzido menos consumido, em unidades por ano."""
+        yearly = self.annual_output() * self.focus_effects().get(
+            'output', 1.0)
+        yield_rate = yearly * TYPE_RESOURCE_YIELDS.get(
+            self.planet_type, {}).get('Food', 1.0)
+        demand = POP_FOOD_PER_YEAR * max(0.0, self.population)
+        return yield_rate - demand
+
+    def resource_output(self) -> dict:
+        """Produção anual estimada de cada recurso, já com o foco aplicado."""
+        yearly = self.annual_output() * self.focus_effects().get(
+            'output', 1.0)
+        yields = TYPE_RESOURCE_YIELDS.get(self.planet_type, {})
+        return {resource: yearly * yields.get(resource, 1.0)
+                for resource in self.planet_resources}
+
+    def population_demand(self) -> float:
+        return POP_FOOD_PER_YEAR * max(0.0, self.population)
 
     def _advance_expansion(self, years: float, wonder_bonus: float = 1.0):
         """A colonização avança a terraformação; níveis sobem sozinhos."""
         if self.terraform_level >= self.max_terraform_level:
             self.terraform_progress = 0.0
             return
-        ratio = self.expansion_ratio()
-        rate = TERRAFORM_RATE_MIN + (
-            TERRAFORM_RATE_MAX - TERRAFORM_RATE_MIN) * ratio
-        self.terraform_progress += years * rate * wonder_bonus
+        self.terraform_progress += years * self.expansion_rate() * wonder_bonus
         while (self.terraform_progress >=
                terraform_years_needed(self.terraform_level)
                and self.terraform_level < self.max_terraform_level):
@@ -250,7 +367,9 @@ class Planet:
                 + min(0.02, max(0, construction - 1) * 0.002)
                 + min(0.01, trade_partners * 0.002))
         famine = getattr(self, 'famine', 0.0)
-        development_rate *= 1.0 - 0.6 * famine
+        effects = self.focus_effects()
+        development_rate *= (1.0 - 0.6 * famine) * effects.get(
+            'development', 1.0)
         growth_factor = (1.0 + development_rate) ** step_scale
         max_dev, max_pop = self._compute_caps()
 
@@ -266,7 +385,8 @@ class Planet:
                 growth_rate = 0.03
             if self.faction is not None:
                 growth_rate *= self.faction.population_growth_multiplier
-            growth_rate *= 1.0 - 0.75 * famine
+            growth_rate *= (effects.get('population', 1.0)
+                            * (1.0 - 0.75 * famine))
             if famine >= 1.0:
                 # Inanição: a população encolhe ~0.6%/ano
                 growth_rate = -0.006
@@ -281,9 +401,10 @@ class Planet:
         # Regen de defesa
         if (self.is_colonized and self.max_defense > 0
                 and self.defense < self.max_defense):
-            self.defense = min(self.max_defense,
-                               self.defense
-                               + 1.5 * self.developement * step_scale)
+            self.defense = min(
+                self.max_defense,
+                self.defense + 1.5 * self.developement * step_scale
+                * effects.get('defense', 1.0))
 
         # Terraformação automática por expansão da colônia.
         wonders = getattr(self.faction, 'wonders', set()) if (
@@ -307,6 +428,52 @@ class Planet:
             self.planet_resources[resource] -= amount
         return True
 
+    def queue_task(self, task: dict) -> dict:
+        """Enfileira uma obra mantendo-a visível e cancelável no painel."""
+        task.setdefault('id', f"{self.name}:{len(self.build_queue)}")
+        self.build_queue.append(task)
+        self.const_queue.put(task)
+        return task
+
+    def queued_tasks(self):
+        return list(self.build_queue)
+
+    def cancel_queued(self, task) -> bool:
+        """Cancela uma obra ainda na fila e devolve o custo pago."""
+        if task is None or task not in self.build_queue:
+            return False
+        self.build_queue.remove(task)
+        task['cancelled'] = True
+        if task.get('kind') == 'habitat':
+            self.habitat_building = False
+        for resource, amount in (task.get('cost') or {}).items():
+            if resource not in self.planet_resources:
+                continue
+            cap = self.storage_capacity.get(resource, float('inf'))
+            self.planet_resources[resource] = min(
+                cap, self.planet_resources[resource] + amount)
+        return True
+
+    def building_progress(self) -> dict:
+        """Obra em execução: rótulo e anos de jogo restantes."""
+        task = getattr(self, 'building_task', None)
+        if not task:
+            return {}
+        state = getattr(self.faction, 'game_state', None) if (
+            self.faction is not None) else None
+        started = float(task.get('started_at', 0.0))
+        duration = float(task.get('build_time', 0.0))
+        smooth = getattr(state, 'smooth_time', None)
+        now = smooth() if callable(smooth) else getattr(
+            state, 'time', started + duration)
+        remaining = max(0.0, started + duration - now)
+        return {'label': task.get('label', 'obra'),
+                'years_left': remaining / 12.0,
+                'months_left': remaining,
+                'percent': (min(1.0, max(0.0, (now - started) / duration))
+                            if duration > 0 else 1.0),
+                'kind': task.get('kind', 'ship')}
+
     def const(self):
         try:
             task = self.const_queue.get_nowait()
@@ -315,12 +482,26 @@ class Planet:
         if self.faction is None:
             self.const_queue.put(task)
             return
+        if task.get('cancelled'):
+            return
+        task['started_at'] = getattr(
+            self.faction.game_state, 'time', 0.0)
+        self.building_task = task
+        try:
+            self.build_queue.remove(task)
+        except ValueError:
+            pass
         if task.get('kind') == 'habitat':
             threading.Thread(target=self._build_habitat, args=(task,),
                              daemon=True).start()
             return
         threading.Thread(target=self._build_ship, args=(task,),
                          daemon=True).start()
+
+    def _finish_task(self, task):
+        """Esquece a obra concluída para o painel não mostrá-la como ativa."""
+        if getattr(self, 'building_task', None) is task:
+            self.building_task = None
 
     def _build_habitat(self, task):
         try:
@@ -352,6 +533,8 @@ class Planet:
         except Exception as e:
             self.habitat_building = False
             print(f"[{self.name}] erro construindo habitat: {e}")
+        finally:
+            self._finish_task(task)
 
     def _build_ship(self, task):
         try:
@@ -400,13 +583,17 @@ class Planet:
             print(f"[{self.name}] {design['display']} {ship.ship_id} pronta")
         except Exception as e:
             print(f"[{self.name}] erro construindo: {e}")
+        finally:
+            self._finish_task(task)
 
     def produce(self, step_scale: float = 1.0):
         if self.faction is None:
             return
+        effects = self.focus_effects()
         prod = (
             self.production * self.developement * step_scale
-            * self.faction.economy_multiplier * self._workforce_factor())
+            * self.faction.economy_multiplier * self._workforce_factor()
+            * effects.get('output', 1.0))
         yields = TYPE_RESOURCE_YIELDS.get(self.planet_type, {})
         game_state = getattr(self.faction, 'game_state', None)
         economic_mode = (
@@ -420,7 +607,8 @@ class Planet:
         for resource in list(self.planet_resources.keys()):
             rate = prod * yields.get(resource, 1.0)
             if resource == 'Research':
-                self.faction.add_research_income(rate)
+                self.faction.add_research_income(
+                    rate * effects.get('research', 1.0))
                 continue
             if resource == 'Credits':
                 continue

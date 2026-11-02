@@ -7,6 +7,51 @@ import networkx as nx
 
 
 TRAVEL_SCALE = 6.0  # meses_de_jogo = dist / (speed * TRAVEL_SCALE)
+EASE_RAMP = 0.22  # fração do trajeto gasta acelerando e desacelerando
+
+
+def ease_travel(u, ramp=EASE_RAMP):
+    """Deslocamento normalizado de um perfil acelera-cruza-desacelera.
+
+    A velocidade é C1-contínua: senoidal nas pontas, constante no meio, de
+    modo que a nave entra e sai do salto suavemente em vez de partir em
+    velocidade máxima.
+    """
+    if u <= 0.0:
+        return 0.0
+    if u >= 1.0:
+        return 1.0
+    ramp = min(max(ramp, 1e-6), 0.5)
+    span = 1.0 - ramp
+    if u < ramp:
+        arc = 0.5 * (u - ramp / math.pi * math.sin(math.pi * u / ramp))
+    elif u > 1.0 - ramp:
+        tail = 1.0 - u
+        arc = span - 0.5 * (tail - ramp / math.pi
+                            * math.sin(math.pi * tail / ramp))
+    else:
+        arc = 0.5 * ramp + (u - ramp)
+    return arc / span
+
+
+def point_at_distance(points, cum, length, travelled):
+    """Ponto e rumo (radianos) a `travelled` unidades da polilinha."""
+    if length <= 0.0:
+        return tuple(points[-1]), None
+    travelled = min(max(travelled, 0.0), length)
+    index = 1
+    while index < len(cum) - 1 and cum[index] < travelled:
+        index += 1
+    origin = points[index - 1]
+    target = points[index]
+    span = cum[index] - cum[index - 1]
+    if span <= 1e-9:
+        return tuple(target), None
+    ratio = (travelled - cum[index - 1]) / span
+    x = origin[0] + (target[0] - origin[0]) * ratio
+    y = origin[1] + (target[1] - origin[1]) * ratio
+    heading = math.atan2(target[1] - origin[1], target[0] - origin[0])
+    return (x, y), heading
 
 
 class Ship(threading.Thread):
@@ -22,7 +67,15 @@ class Ship(threading.Thread):
         self.current_position = current_position
         self.total_stars = total_stars
         self.stars_dict = {s.name: s for s in total_stars}
-        self.abs_position = list(current_position.position)
+        self._position = list(current_position.position)
+        self._voyage = None
+        # Reentrante: o getter de posição finaliza a viagem sob a mesma trava.
+        self._motion_lock = threading.RLock()
+        self._station_cache = {}
+        self._pinned = None
+        self.heading = -math.pi / 2
+        self.order = None
+        self._wake = threading.Event()
 
         self.speed = max(0.1, speed)
         self.max_hull = float(hull)
@@ -35,6 +88,196 @@ class Ship(threading.Thread):
         self.alive = True
         self.running = False
         self.activity = "idle"
+
+    # ---------- posição paramétrica no tempo ----------
+    def _station_for(self, star):
+        """Slot de formação ao redor da estrela: mantém a frota legível."""
+        if star is None:
+            return tuple(self._position)
+        slot = self._station_cache.get(star.name)
+        if slot is None:
+            generator = random.Random(f"{self.ship_id}:{star.name}")
+            angle = generator.uniform(0.0, math.tau)
+            distance = 5.0 + generator.uniform(0.0, 20.0)
+            slot = (star.position[0] + math.cos(angle) * distance,
+                    star.position[1] + math.sin(angle) * distance)
+            if len(self._station_cache) > 64:
+                self._station_cache.clear()
+            self._station_cache[star.name] = slot
+        return slot
+
+    @property
+    def abs_position(self):
+        with self._motion_lock:
+            voyage = self._voyage
+            if voyage is None:
+                if self._pinned is not None:
+                    return list(self._pinned)
+                return list(self._station_for(self.current_position))
+            progress = self._voyage_progress(voyage)
+            if progress >= 1.0:
+                self._complete_voyage(voyage)
+                return list(self._position)
+            travelled = ease_travel(progress) * voyage['length']
+            point, heading = point_at_distance(
+                voyage['points'], voyage['cum'], voyage['length'], travelled)
+            if heading is not None:
+                self.heading = heading
+            return [point[0], point[1]]
+
+    @abs_position.setter
+    def abs_position(self, value):
+        with self._motion_lock:
+            self._voyage = None
+            self._position = [float(value[0]), float(value[1])]
+            self._pinned = list(self._position)
+
+    @property
+    def is_moving(self):
+        return self._voyage is not None
+
+    def _clock(self):
+        state = getattr(self.faction, 'game_state', None)
+        if state is None:
+            return time.monotonic()
+        smooth = getattr(state, 'smooth_time', None)
+        if callable(smooth):
+            return smooth()
+        return state.time
+
+    def _voyage_progress(self, voyage):
+        duration = voyage['duration']
+        if duration <= 0.0:
+            return 1.0
+        return min(1.0, max(0.0, (self._clock() - voyage['start']) / duration))
+
+    def _complete_voyage(self, voyage):
+        with self._motion_lock:
+            if self._voyage is not voyage:
+                return False
+            self._voyage = None
+            self._position = list(voyage['points'][-1])
+            self.current_position = voyage['destinations'][-1]
+            self._pinned = None
+            return True
+
+    def start_voyage(self, stars, activity=None, speed_cap=None):
+        """Inicia um único trajeto contínuo por uma sequência de estrelas."""
+        destinations = [star for star in stars if star is not None]
+        if not destinations:
+            return False
+        with self._motion_lock:
+            points = [tuple(self.abs_position)]
+            for star in destinations[:-1]:
+                points.append(tuple(star.position))
+            points.append(self._station_for(destinations[-1]))
+            cum = [0.0]
+            for index in range(1, len(points)):
+                cum.append(cum[-1] + math.dist(points[index - 1],
+                                               points[index]))
+            length = cum[-1]
+            if length <= 1e-6:
+                self._voyage = None
+                self._position = list(points[-1])
+                self._pinned = None
+                self.current_position = destinations[-1]
+                return True
+            effective = self.speed
+            if speed_cap is not None:
+                effective = min(effective, max(0.1, float(speed_cap)))
+            self._voyage = {
+                'points': points, 'cum': cum, 'length': length,
+                'destinations': destinations,
+                'arrivals': cum[1:],
+                'visited': set(),
+                'start': self._clock(),
+                'duration': length / (effective * TRAVEL_SCALE),
+            }
+        if activity:
+            self.activity = activity
+        return True
+
+    def stop_voyage(self):
+        """Congela a nave no ponto atual do trajeto."""
+        position = list(self.abs_position)
+        with self._motion_lock:
+            self._voyage = None
+            self._position = position
+            self._pinned = position
+
+    def wait_for_voyage(self, on_arrive=None):
+        """Aguarda o trajeto, disparando `on_arrive` ao passar por cada estrela.
+
+        Retorna False quando a nave morreu, parou ou recebeu uma ordem.
+        """
+        while self.running and self.alive:
+            voyage = self._voyage
+            if voyage is None:
+                return True
+            if self.order is not None:
+                return False
+            progress = self._voyage_progress(voyage)
+            eased = ease_travel(progress) * voyage['length']
+            if on_arrive is not None:
+                for index, arrival in enumerate(voyage['arrivals']):
+                    if index in voyage['visited'] or eased < arrival - 1e-6:
+                        continue
+                    voyage['visited'].add(index)
+                    if on_arrive(voyage['destinations'][index]) is False:
+                        return False
+            if progress >= 1.0:
+                self._complete_voyage(voyage)
+                return True
+            time.sleep(0.02)
+        return False
+
+    def travel_path(self, stars, on_arrive=None, activity=None,
+                    speed_cap=None):
+        if not self.start_voyage(stars, activity, speed_cap):
+            return self.running and self.alive
+        return self.wait_for_voyage(on_arrive)
+
+    # ---------- ordens manuais ----------
+    def issue_order(self, kind, star=None, planet=None, speed_cap=None):
+        if kind not in ('move', 'hold', 'clear'):
+            return False
+        if kind == 'move' and star is None:
+            return False
+        if kind == 'hold':
+            self.stop_voyage()
+        self.order = {'kind': kind, 'star': star, 'planet': planet,
+                      'speed_cap': speed_cap}
+        self._wake.set()
+        return True
+
+    def clear_order(self):
+        self.order = None
+        self._wake.set()
+
+    def _handle_order(self):
+        """Executa uma ordem pendente. True quando ela foi atendida."""
+        order = self.order
+        if order is None:
+            return False
+        kind = order['kind']
+        if kind == 'clear':
+            self.clear_order()
+            return False
+        # A ordem passa a ser a ação corrente: libera o trajeto para reagir
+        # a uma ordem seguinte.
+        self.order = None
+        if kind == 'hold':
+            self.activity = "aguardando ordens"
+            while self.running and self.alive and self.order is None:
+                time.sleep(0.05)
+            self._wake.set()
+            return True
+        star = order['star']
+        self.activity = f"-> {star.name} (ordem)"
+        path = self.find_path_to_star(star) or [star]
+        self.travel_path(path, speed_cap=order.get('speed_cap'))
+        self._wake.set()
+        return True
 
     def run(self):
         self.running = True
@@ -49,56 +292,25 @@ class Ship(threading.Thread):
 
     # ---------- utilidades de tempo-de-jogo ----------
     def _wait_game_time(self, seconds):
-        state = getattr(self.faction, 'game_state', None)
-        if state is None:
+        t0 = self._clock()
+        if getattr(self.faction, 'game_state', None) is None:
             time.sleep(seconds)
             return
-        t0 = state.time
-        while state.time - t0 < seconds:
-            if not self.running or not self.alive:
+        while self.running and self.alive and self.order is None:
+            if self._clock() - t0 >= seconds:
                 return
             time.sleep(0.02)
 
     # ---------- movimento controlado pelo relógio global ----------
     def move_to_star(self, from_star, to_star):
-        if from_star is None or to_star is None or from_star is to_star:
+        if from_star is None or to_star is None:
             return
-        try:
-            dist = self.map_G[from_star.name][to_star.name]['weight']
-        except KeyError:
-            self.current_position = to_star
-            self.abs_position = list(to_star.position)
+        if self.current_position is to_star and self._voyage is None:
             return
-
-        game_travel_time = dist / (self.speed * TRAVEL_SCALE)
-        steps = max(10, min(2000, int(game_travel_time * 30)))
-        xs = np.linspace(from_star.position[0], to_star.position[0], steps)
-        ys = np.linspace(from_star.position[1], to_star.position[1], steps)
-
-        state = getattr(self.faction, 'game_state', None)
         self.activity = f"-> {to_star.name}"
-
-        if state is None:
-            for x, y in zip(xs, ys):
-                if not self.running or not self.alive:
-                    break
-                self.abs_position[0] = x
-                self.abs_position[1] = y
-                time.sleep(0.02)
-        else:
-            t0 = state.time
-            step_time = game_travel_time / steps
-            for i, (x, y) in enumerate(zip(xs, ys)):
-                if not self.running or not self.alive:
-                    return
-                target_t = t0 + i * step_time
-                while state.time < target_t:
-                    if not self.running or not self.alive:
-                        return
-                    time.sleep(0.02)
-                self.abs_position[0] = x
-                self.abs_position[1] = y
-
+        self.travel_path([to_star])
+        if not self.running or not self.alive:
+            return
         self.current_position = to_star
         self.activity = "idle"
 
@@ -144,20 +356,28 @@ class Scout(Ship):
             self.faction.scout_manager.register_scout(self.ship_id, self)
 
         while self.running and self.alive:
+            if self._handle_order():
+                continue
             target = self._pick_unexplored()
             if target is None:
                 self.activity = "sem alvos"
                 self._wait_game_time(3)
                 continue
             path = self.find_path_to_star(target) or [target]
-            for star in path:
+            self.activity = f"-> {target.name}"
+            if not self.travel_path(path, on_arrive=self._scan):
                 if not self.running or not self.alive:
                     return
-                self.move_to_star(self.current_position, star)
-                if star.name not in self.faction.explored_stars:
-                    self.activity = f"explorando {star.name}"
-                    self._wait_game_time(self.scan_time)
-                    self.faction.explored_stars.add(star.name)
+                continue
+            self.activity = "idle"
+
+    def _scan(self, star):
+        if star.name in self.faction.explored_stars:
+            return True
+        self.activity = f"explorando {star.name}"
+        self._wait_game_time(self.scan_time)
+        self.faction.explored_stars.add(star.name)
+        return self.running and self.alive and self.order is None
 
     def _pick_unexplored(self):
         remaining = [s for s in self.total_stars
@@ -174,7 +394,6 @@ class ColonyShip(Ship):
         super().__init__(**kwargs)
         self.target_star = None
         self.target_planet = None
-        self._wake = threading.Event()
 
     def assign_target(self, star, planet):
         if self.target_planet is not None:
@@ -203,15 +422,17 @@ class ColonyShip(Ship):
 
     def tick(self):
         while self.running and self.alive:
+            if self._handle_order():
+                continue
             if not self._wake.wait(0.5):
                 continue
+            self._wake.clear()
             if not self.running or not self.alive:
                 return
 
             tgt_star = self.target_star
             tgt_planet = self.target_planet
             if tgt_star is None or tgt_planet is None:
-                self._wake.clear()
                 continue
 
             if tgt_planet.is_colonized:
@@ -219,10 +440,11 @@ class ColonyShip(Ship):
                 return
 
             path = self.find_path_to_star(tgt_star) or [tgt_star]
-            for star in path:
+            if not self.travel_path(path, activity=f"-> {tgt_planet.name}"):
                 if not self.running or not self.alive:
                     return
-                self.move_to_star(self.current_position, star)
+                self._wake.set()
+                continue
 
             if not self.running or not self.alive:
                 return
@@ -379,11 +601,7 @@ class Transport(Ship):
         path = self.find_path_to_star(planet.parent_star)
         if path is None:
             return False
-        for star in path:
-            if not self.running or not self.alive:
-                return False
-            self.move_to_star(self.current_position, star)
-        return self.running and self.alive
+        return self.travel_path(path)
 
     def _clear_mission(self, completed=False):
         self.load = 0.0
@@ -396,6 +614,8 @@ class Transport(Ship):
 
     def tick(self):
         while self.running and self.alive:
+            if self._handle_order():
+                continue
             logistics = self.faction.logistics_manager
             has_cargo = (
                 self.population_cargo > 1e-6
@@ -511,13 +731,15 @@ class Warship(Ship):
             if self.shields < self.max_shields:
                 self.shields = min(self.max_shields,
                                    self.shields + self.max_shields * 0.02)
+            if self._handle_order():
+                continue
             target = self._pick_enemy_star()
             if target is not None:
                 path = self.find_path_to_star(target) or [target]
-                for star in path:
+                if not self.travel_path(path, activity=f"-> {target.name}"):
                     if not self.running or not self.alive:
                         return
-                    self.move_to_star(self.current_position, star)
+                    continue
                 self._wait_game_time(2)
                 continue
             patrol = list(self.faction.controlled_stars.values())
@@ -525,11 +747,11 @@ class Warship(Ship):
                 dest = random.choice(patrol)
                 if dest is not self.current_position:
                     path = self.find_path_to_star(dest)
-                    if path:
-                        for star in path:
-                            if not self.running or not self.alive:
-                                return
-                            self.move_to_star(self.current_position, star)
+                    if path and not self.travel_path(
+                            path, activity=f"patrulhando {dest.name}"):
+                        if not self.running or not self.alive:
+                            return
+                        continue
             self._wait_game_time(2)
 
     def _pick_enemy_star(self):

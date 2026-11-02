@@ -6,6 +6,7 @@ from enum import Enum
 from graphics.star import SIMULATION_STEP_YEARS
 from players.ships import Scout, ColonyShip, Transport, Warship
 from logistics.modules.logistics_manager import LogisticsManager
+from players.fleets import FleetManager
 
 RESEARCH_SCALE = 1.0
 BASE_COLONIZATION_RANGE = 350.0
@@ -239,6 +240,7 @@ class Faction:
         self.ships = {}
         self._ship_counter = 0
         self.logistics_manager = LogisticsManager(self)
+        self.fleet_manager = FleetManager(self)
         
         self.stations = {}
         self.scout_manager = None
@@ -357,13 +359,16 @@ class Faction:
             return False
         planet.pay_cost(design['cost'])
         self._recompute_resources()
+        task_id = self._next_ship_id()
         task = {'design_key': design_key,
+                'label': f"{design['display']} {task_id}",
                 'build_time': design['build_time'],
-                'id': self._next_ship_id(),
+                'cost': dict(design['cost']),
+                'id': task_id,
                 'planet': planet,
                 'target_planet': target_planet,
                 'target_star': target_star}
-        planet.const_queue.put(task)
+        planet.queue_task(task)
         return True
 
     def spawn_ship(self, design_key, at_star=None):
@@ -491,12 +496,15 @@ class Faction:
             planet = max(candidates, key=lambda p: p.population)
         if not self.can_build_habitat(planet):
             return False
-        planet.pay_cost(self.habitat_cost(planet))
+        cost = self.habitat_cost(planet)
+        planet.pay_cost(cost)
         self._recompute_resources()
         planet.habitat_building = True
-        planet.const_queue.put({
+        planet.queue_task({
             'kind': 'habitat',
+            'label': f"Habitat orbital de {planet.name}",
             'build_time': HABITAT_BUILD_TIME,
+            'cost': cost,
             'faction': self,
             'id': f"HAB-{self.name[:3].upper()}-{planet.habitats + 1}",
         })

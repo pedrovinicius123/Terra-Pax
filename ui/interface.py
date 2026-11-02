@@ -17,8 +17,25 @@ from graphics.planet_generator import (
     generate_planet_surface,
 )
 from graphics.ship_sprites import get_ship_sprite
-from graphics.star import format_population
+from graphics.star import (
+    COLONY_FOCUSES,
+    FOCUS_LABELS,
+    HABITAT_MAX_PER_PLANET,
+    format_population,
+    planet_label_for,
+)
 from logistics.game_3d import PLANET_TYPE_LABELS, PlanetViewer3D, planet_type_of
+
+
+ORDER_LABELS = {
+    'move': 'em rota',
+    'hold': 'paradas',
+    'clear': 'retomando operações automáticas',
+}
+
+
+def outcome_label(kind):
+    return ORDER_LABELS.get(kind, kind)
 
 
 class C:
@@ -96,8 +113,36 @@ class _FakeLabel:
         self.color = color
 
     def draw(self, screen):
-        screen.blit(self.font.render(self.text, True, self.color),
-                    self.rect.topleft)
+        lines = str(self.text).split("\n")
+        line_height = self.font.get_height() + 1
+        for offset, line in enumerate(lines):
+            screen.blit(self.font.render(line, True, self.color),
+                        (self.rect.x, self.rect.y + offset * line_height))
+
+
+class _FakeBar:
+    """Barra de progresso rolável junto dos rótulos do painel."""
+
+    def __init__(self, rect, fraction, color, font=None, text='',
+                 track=(30, 40, 60)):
+        self.rect = pygame.Rect(rect)
+        self.fraction = fraction
+        self.color = color
+        self.font = font
+        self.text = text
+        self.track = track
+
+    def draw(self, screen):
+        pygame.draw.rect(screen, self.track, self.rect, border_radius=3)
+        ratio = min(1.0, max(0.0, self.fraction))
+        if ratio > 0.0:
+            fill = pygame.Rect(self.rect.x, self.rect.y,
+                               max(2, int(self.rect.width * ratio)),
+                               self.rect.height)
+            pygame.draw.rect(screen, self.color, fill, border_radius=3)
+        if self.text and self.font is not None:
+            surf = self.font.render(self.text, True, C.TEXT)
+            screen.blit(surf, surf.get_rect(center=self.rect.center))
 
 
 class _NumericSlider:
@@ -162,6 +207,9 @@ class GameUI:
     MIN_ZOOM = 0.05
     MAX_ZOOM = 120.0
     PANEL_LIST_TOP = TOP_H + 86
+    SHIP_HEADING_STEPS = 24
+    GRID_BASE_STEP = 100
+    GRID_MIN_PX = 24
 
     def __init__(self, screen, state, player_ctrl):
         self.screen = screen
@@ -179,6 +227,8 @@ class GameUI:
         self.selected_star = None
         self.selected_planet = None
         self.hovered_star = None
+        self.selected_ships = []
+        self._marquee = None
         self.filter_mode = 'all'
 
         self.tabs = ['resources', 'system', 'research', 'fleet',
@@ -206,6 +256,7 @@ class GameUI:
         self._planet_surfaces = {}
         self._map_planet_surfaces = {}
         self._belt_speck_cache = {}
+        self._ship_sprite_cache = {}
         self.planet_viewer = None
         self._last_event_idx = 0
         self._top_buttons = []
@@ -214,6 +265,7 @@ class GameUI:
         self._panel_buttons = []
         self._texture_slider = None
         self._action_buttons = []
+        self._planner_actions = []
 
         self._build_top_buttons()
         self._build_filter_buttons()
@@ -358,10 +410,532 @@ class GameUI:
         else:
             self.log_msg("Recursos insuficientes")
 
-    def _select_ship(self, ship):
-        self.player.selected_ship = ship
-        self.off_x, self.off_y = ship.abs_position
+    def _select_ship(self, ship, center=True):
+        self._set_ship_selection([ship])
+        if center:
+            self.off_x, self.off_y = ship.abs_position
         self.log_msg(f"Selecionada {ship.ship_id}")
+
+    # ---------- seleção de naves ----------
+    def _own_ships(self):
+        return [ship for ship in list(self.faction.ships.values())
+                if ship.alive]
+
+    def _set_ship_selection(self, ships):
+        self.selected_ships = [ship for ship in ships if ship.alive]
+        self.player.selected_ship = (self.selected_ships[-1]
+                                     if self.selected_ships else None)
+        self._rebuild_action_buttons()
+
+    def _toggle_ship_selection(self, ship):
+        if ship in self.selected_ships:
+            self._set_ship_selection(
+                [item for item in self.selected_ships if item is not ship])
+        else:
+            self._set_ship_selection(self.selected_ships + [ship])
+
+    def _ship_at(self, pos, radius=18):
+        wx, wy = self.screen_to_world(*pos)
+        limit = radius / max(1e-6, self.zoom)
+        best, best_dist = None, limit
+        for ship in self._own_ships():
+            distance = math.dist((wx, wy), ship.abs_position)
+            if distance < best_dist:
+                best, best_dist = ship, distance
+        return best
+
+    def _ships_in_rect(self, rect):
+        return [ship for ship in self._own_ships()
+                if rect.collidepoint(self.world_to_screen(*ship.abs_position))]
+
+    # ---------- ordens ----------
+    def _order_ships(self, kind, star=None):
+        if not self.selected_ships:
+            self.log_msg("Selecione naves primeiro")
+            return 0
+        issued = sum(1 for ship in self.selected_ships
+                     if ship.issue_order(kind, star=star))
+        detail = f" {star.name}" if kind == 'move' and star else ""
+        self.log_msg(f"{issued} nave(s){detail} "
+                     f"{outcome_label(kind)}")
+        self._rebuild_action_buttons()
+        return issued
+
+    def _fleet_order(self, fleet_id, kind):
+        issued = self.faction.fleet_manager.order(
+            fleet_id, kind, star=self.selected_star)
+        if issued:
+            self.log_msg(f"{issued} nave(s) da frota {outcome_label(kind)}")
+        self._rebuild_panel_buttons()
+
+    def _auto_group_fleets(self):
+        created = self.faction.fleet_manager.auto_group()
+        self.log_msg(f"{created} frota(s) agrupadas por estrela")
+        self._rebuild_panel_buttons()
+
+    def _fleet_from_selection(self):
+        manager = self.faction.fleet_manager
+        fleet = manager.create(self.selected_ships)
+        if fleet is None:
+            self.log_msg("Selecione naves para formar uma frota")
+        else:
+            self.log_msg(f"{fleet.name}: {len(fleet.ships)} naves")
+        self._rebuild_panel_buttons()
+
+    def _select_fleet(self, fleet_id):
+        fleet = self.faction.fleet_manager.fleets.get(fleet_id)
+        if fleet is None:
+            return
+        self._set_ship_selection(fleet.ships)
+        star = fleet.location()
+        if star is not None:
+            self.off_x, self.off_y = star.position
+        self.log_msg(f"{fleet.name} selecionada")
+        self._rebuild_panel_buttons()
+
+    def _disband_fleet(self, fleet_id):
+        fleet = self.faction.fleet_manager.fleets.get(fleet_id)
+        if self.faction.fleet_manager.disband(fleet_id) and fleet:
+            self.log_msg(f"{fleet.name} dissolvida")
+        self._rebuild_panel_buttons()
+
+    def _draw_fleet_manager(self, f, x0, w, y):
+        """Seção de frotas: resumo, seleção e ordens conjuntas."""
+        manager = f.fleet_manager
+        self._panel_buttons.append(_FakeLabel(
+            (x0, y, w, 18),
+            f"FROTAS  ·  {len(manager.fleets)}",
+            self.f_small, color=C.ACCENT))
+        y += 20
+        half = (w - 16) // 2
+        self._panel_buttons.append(Button(
+            (x0 + 4, y, half, 24), "Agrupar por estrela",
+            self._auto_group_fleets))
+        self._panel_buttons.append(Button(
+            (x0 + 10 + half, y, half, 24),
+            f"Frota da seleção ({len(self.selected_ships)})",
+            self._fleet_from_selection,
+            enabled=lambda: bool(self.selected_ships)))
+        y += 30
+
+        fleets = list(manager.fleets.values())
+        if not fleets:
+            self._panel_buttons.append(_FakeLabel(
+                (x0 + 8, y, w - 8, 18),
+                "Nenhuma frota — agrupe ou crie a partir da seleção.",
+                self.f_small))
+            y += 22
+            return y
+
+        for fleet in fleets:
+            info = fleet.summary()
+            members = fleet.ships
+            highlighted = bool(self.selected_ships) and all(
+                ship in self.selected_ships for ship in members)
+            button = Button(
+                (x0 + 4, y, w - 12, 24),
+                f"{info['name']}  ·  {info['ships']} naves  ·  "
+                f"{info['status']}",
+                lambda fleet_id=fleet.fleet_id: self._select_fleet(fleet_id),
+            )
+            button._active = highlighted
+            self._panel_buttons.append(button)
+            y += 25
+            self._panel_buttons.append(_FakeLabel(
+                (x0 + 10, y, w - 18, 16),
+                f"casco {info['hull']:.0f}  ·  fogo "
+                f"{info['firepower']:.0f}  ·  vel {info['speed']:.1f}",
+                self.f_small))
+            y += 18
+            gap = 4
+            small = (w - 12 - 3 * gap) // 4
+            actions = (("Mover *", 'move'), ("Parar", 'hold'),
+                       ("Auto", 'clear'))
+            for index, (label, kind) in enumerate(actions):
+                rect = (x0 + 4 + index * (small + gap), y, small, 22)
+                usable = kind != 'move' or self.selected_star is not None
+                self._panel_buttons.append(Button(
+                    rect, label,
+                    lambda fleet_id=fleet.fleet_id, order=kind:
+                    self._fleet_order(fleet_id, order),
+                    enabled=lambda available=usable: available,
+                ))
+            self._panel_buttons.append(Button(
+                (x0 + 4 + 3 * (small + gap), y, small, 22), "Dissolver",
+                lambda fleet_id=fleet.fleet_id: self._disband_fleet(fleet_id)))
+            y += 28
+        return y
+
+    @staticmethod
+    def _compact(value):
+        value = float(value)
+        for limit, suffix in ((1e9, 'G'), (1e6, 'M'), (1e3, 'k')):
+            if abs(value) >= limit:
+                return f"{value / limit:.1f}{suffix}"
+        return f"{value:.0f}"
+
+    @staticmethod
+    def _years_label(years):
+        if years is None or not math.isfinite(years):
+            return "sem progresso"
+        if years >= 1000.0:
+            return f"{years:,.0f} anos".replace(',', '.')
+        return f"{years:.1f} anos"
+
+    @staticmethod
+    def _focus_label(planet):
+        return FOCUS_LABELS.get(getattr(planet, 'focus', 'balanced'), '—')
+
+    @staticmethod
+    def _years_short(years):
+        if years is None or not math.isfinite(years):
+            return '—'
+        if years >= 1000.0:
+            return f"{years / 1000.0:.1f} mil a"
+        return f"{years:.0f} a"
+
+    @staticmethod
+    def _stage_label(stage):
+        if stage >= 0.95:
+            return 'Gaia'
+        if stage >= 0.80:
+            return 'mundo vivo'
+        if stage >= 0.60:
+            return 'biosfera jovem'
+        if stage >= 0.40:
+            return 'em transformação'
+        if stage >= 0.28:
+            return 'quase estéril'
+        return 'rocha estéril'
+
+    def _set_colony_focus(self, planet, focus):
+        if not planet.set_focus(focus):
+            return
+        self.log_msg(f"{planet.name}: foco {FOCUS_LABELS[focus].lower()}")
+        self._rebuild_panel_buttons()
+
+    def _cancel_colony_task(self, planet, task):
+        if planet.cancel_queued(task):
+            self.log_msg(f"{planet.name}: obra cancelada "
+                         f"({task.get('label', 'obra')})")
+        self._rebuild_panel_buttons()
+
+    def _draw_colony_manager(self, f, planet, x0, w, y):
+        """Gestão detalhada: terraformação, capacidade, foco, obras e recursos."""
+        info = planet.expansion_info()
+        growth = planet.growth_projection()
+        stage = planet.terraforming_stage()
+        outputs = planet.resource_output()
+        world = planet_label_for(getattr(planet, 'planet_type',
+                                         'terrestrial'))
+
+        self._panel_buttons.append(_FakeLabel(
+            (x0, y, w, 18), f"GESTÃO  ·  {planet.name}", self.f_small,
+            color=C.ACCENT))
+        y += 20
+        self._panel_buttons.append(_FakeLabel(
+            (x0 + 4, y, w, 16),
+            f"{world} · {planet.parent_star.name} · {planet.name}",
+            self.f_small))
+        y += 14
+        self._panel_buttons.append(_FakeLabel(
+            (x0 + 4, y, w, 16),
+            f"{self._stage_label(stage)} · exp {info['level']}/{info['max']}"
+            f" · hab {planet.habitats}/{HABITAT_MAX_PER_PLANET}",
+            self.f_small))
+        y += 18
+        self._panel_buttons.append(_FakeBar(
+            (x0 + 4, y, w - 8, 12), stage, C.PLANET_MINE, self.f_small,
+            f"retrato do mundo {stage * 100:.0f}% (estéril → Gaia)"))
+        y += 16
+        remaining = ('concluído' if info['level'] >= info['max']
+                     else self._years_short(info['eta_years']))
+        self._panel_buttons.append(_FakeLabel(
+            (x0 + 4, y, w, 16),
+            f"expansão {info['percent'] * 100:.0f}% · "
+            f"{info['rate']:.2f} anos-terra/ano · próx. nível: {remaining}",
+            self.f_small))
+        y += 18
+
+        half = (w - 12) // 2
+        self._panel_buttons.append(_FakeBar(
+            (x0 + 4, y, half, 12),
+            planet.population / max(1e-6, growth['max_pop']), C.SELECTED,
+            self.f_small,
+            f"pop {format_population(planet.population)}/"
+            f"{format_population(growth['max_pop'])}"))
+        self._panel_buttons.append(_FakeBar(
+            (x0 + 12 + half, y, half, 12),
+            planet.developement / max(1e-6, growth['max_dev']), C.STAR,
+            self.f_small,
+            f"desenv {planet.developement:.1f}/{growth['max_dev']:.0f}"))
+        y += 16
+
+        food = growth['food_balance']
+        self._panel_buttons.append(_FakeLabel(
+            (x0 + 4, y, w, 16),
+            f"alimento {food:+.0f}/ano · fome "
+            f"{getattr(planet, 'famine', 0.0) * 100:.0f}% · crescimento "
+            f"{growth['pop_growth_rate'] * 100:.2f}%/ano",
+            self.f_small,
+            color=C.PLANET_FREE_GOOD if food >= 0 else C.PLANET_ENEMY))
+        y += 18
+        self._panel_buttons.append(_FakeLabel(
+            (x0 + 4, y, w, 16),
+            f"defesa {planet.defense:.0f}/{planet.max_defense:.0f} · "
+            f"estaleiro {'sim' if planet.can_build_ships else 'não'}",
+            self.f_small))
+        y += 20
+
+        self._panel_buttons.append(_FakeLabel(
+            (x0, y, w, 16),
+            f"PRODUÇÃO  ·  {self._compact(planet.annual_output())} un/ano",
+            self.f_small, color=C.ACCENT))
+        y += 18
+        shown = [name for name in C.RES if name != 'Research']
+        column = (w - 8) // 2
+        for index, name in enumerate(shown):
+            row, side = divmod(index, 2)
+            stock = planet.planet_resources.get(name, 0.0)
+            cap = planet.storage_capacity.get(name, float('inf'))
+            rate = outputs.get(name, 0.0)
+            cap_text = (self._compact(cap) if math.isfinite(cap) else '∞')
+            self._panel_buttons.append(_FakeLabel(
+                (x0 + 4 + side * column, y + row * 14, column - 6, 14),
+                f"{name[:8]:<8s}{self._compact(stock):>6s}/{cap_text:<5s}"
+                f"+{self._compact(rate)}",
+                self.f_small, color=C.RES[name]))
+        y += 14 * ((len(shown) + 1) // 2) + 8
+
+        self._panel_buttons.append(_FakeLabel(
+            (x0, y, w, 16), f"FOCO  ·  {self._focus_label(planet)}",
+            self.f_small, color=C.ACCENT))
+        y += 18
+        gap = 4
+        small = (w - 8 - 4 * gap) // 5
+        short = {'balanced': 'Equil', 'industry': 'Indús',
+                 'growth': 'Cresc', 'defense': 'Defes', 'science': 'Ciênc'}
+        for index, focus in enumerate(COLONY_FOCUSES):
+            button = Button(
+                (x0 + 4 + index * (small + gap), y, small, 22),
+                short[focus],
+                lambda selected=planet, chosen=focus: self._set_colony_focus(
+                    selected, chosen),
+                tooltip=FOCUS_LABELS[focus])
+            button._active = planet.focus == focus
+            self._panel_buttons.append(button)
+        y += 26
+        effects = planet.focus_effects()
+        names = {'development': 'desenv', 'population': 'pop',
+                 'output': 'prod', 'research': 'pesq', 'defense': 'defesa'}
+        summary = ('  '.join(f"{names.get(k, k)} x{v:.2f}"
+                             for k, v in sorted(effects.items()))
+                   if effects else 'sem modificadores')
+        self._panel_buttons.append(_FakeLabel(
+            (x0 + 4, y, w, 14), f"efeitos: {summary}", self.f_small))
+        y += 20
+
+        active = planet.building_progress()
+        queue = planet.queued_tasks()
+        self._panel_buttons.append(_FakeLabel(
+            (x0, y, w, 16),
+            f"OBRAS  ·  {len(queue)} na fila", self.f_small, color=C.ACCENT))
+        y += 18
+        if active:
+            self._panel_buttons.append(_FakeBar(
+                (x0 + 4, y, w - 8, 12), active['percent'], C.STAR,
+                self.f_small,
+                f"{active['label'][:30]} · "
+                f"{self._years_label(active['years_left'])}"))
+            y += 16
+        for task in queue[:6]:
+            row = (x0 + 4, y, w - 34, 14)
+            self._panel_buttons.append(_FakeLabel(
+                row, f"fila: {str(task.get('label', 'obra'))[:34]}",
+                self.f_small))
+            self._panel_buttons.append(Button(
+                (x0 + w - 26, y - 4, 22, 20), "x",
+                lambda selected=planet, item=task: self._cancel_colony_task(
+                    selected, item)))
+            y += 22
+        habitat_button = Button(
+            (x0 + 4, y, w - 8, 24),
+            ("Habitat orbital — máximo atingido"
+             if planet.habitats >= HABITAT_MAX_PER_PLANET else
+             ("Habitat em construção…" if planet.habitat_building else
+              "Construir habitat orbital")),
+            lambda selected=planet: self._build_habitat(selected),
+            enabled=lambda selected=planet: f.can_build_habitat(selected))
+        self._panel_buttons.append(habitat_button)
+        y += 30
+        return y
+
+    def _colony_recommendations(self, f):
+        """Diagnóstico agrupado do império: (gravidade, texto, ação, rótulo)."""
+        groups = {}
+
+        def add(severity, kind, text, planet, action, label):
+            entry = groups.setdefault((severity, kind), {
+                'text': text, 'planets': [], 'action': action, 'label': label})
+            entry['planets'].append(planet)
+
+        for planet in f.colonies.values():
+            growth = planet.growth_projection()
+            info = planet.expansion_info()
+            pressure = planet.population / max(1e-6, growth['max_pop'])
+            food = growth['food_balance']
+
+            if food < 0.0 and planet.focus != 'industry':
+                add(0, 'food_focus',
+                    f"falta alimento ({food:.1f}/ano) — foco Indústria "
+                    f"eleva a produção", planet, 'focus_industry', 'foco')
+            elif food < 0.0:
+                add(0, 'food_ships',
+                    f"fome ({food:.1f}/ano) — envie transportes de alimento",
+                    planet, 'select', 'ver')
+            if getattr(planet, 'famine', 0.0) > 0.05:
+                add(0, 'famine',
+                    f"fome de {planet.famine * 100:.0f}% — crescimento "
+                    f"travado", planet, 'select', 'ver')
+            if (pressure >= 0.9 and planet.habitats < HABITAT_MAX_PER_PLANET
+                    and not planet.habitat_building):
+                add(1, 'habitat',
+                    f"população a {pressure * 100:.0f}% do teto — habitat "
+                    f"orbital libera capacidade", planet, 'habitat', 'habitat')
+            if (pressure >= 0.9 and planet.habitats >= HABITAT_MAX_PER_PLANET
+                    and info['level'] < info['max']):
+                add(2, 'waiting_level',
+                    f"sem espaço e o nível {info['level']} ainda cresce "
+                    f"({self._years_label(info['eta_years'])})",
+                    planet, 'select', 'ver')
+            if info['eta_years'] > 400.0 and planet.focus != 'industry':
+                add(3, 'slow_terraform',
+                    f"terraformação lenta "
+                    f"({self._years_label(info['eta_years'])}) — foco "
+                    f"Indústria acelera o desenvolvimento",
+                    planet, 'focus_industry', 'foco')
+            if (planet.capacity_info()['dev_capped']
+                    and info['level'] < info['max']):
+                add(4, 'dev_capped',
+                    "desenvolvimento no teto — só a expansão de nível abre "
+                    "espaço", planet, None, None)
+
+        handlers = {
+            'focus_industry': lambda planet: self._set_colony_focus(
+                planet, 'industry'),
+            'habitat': lambda planet: self._build_habitat(planet),
+            'select': lambda planet: self._select_colony(planet),
+        }
+        recommendations = []
+        for (severity, kind), entry in groups.items():
+            worlds = entry['planets']
+            text = entry['text']
+            if len(worlds) == 1:
+                title = f"{worlds[0].name}: {text}"
+            else:
+                names = ", ".join(planet.name for planet in worlds[:2])
+                more = f" +{len(worlds) - 2}" if len(worlds) > 2 else ""
+                title = f"{len(worlds)} colônias ({names}{more}): {text}"
+            handler = handlers.get(entry['action'])
+            recommendations.append((
+                severity, title,
+                (lambda selected=worlds, run=handler:
+                 [run(planet) for planet in selected])
+                if handler is not None else None,
+                entry['label']))
+
+        recommendations.sort(key=lambda item: (item[0], item[1]))
+        return recommendations[:8]
+
+    def _apply_all_recommendations(self):
+        actions = [action for _, _, action, _ in self._planner_actions
+                   if action is not None]
+        if not actions:
+            self.log_msg("Nada a aplicar no plano")
+            return
+        for action in actions:
+            action()
+        self.log_msg(f"Plano aplicado: {len(actions)} medidas")
+        self._rebuild_panel_buttons()
+
+    def _draw_colony_planner(self, f, x0, w, y):
+        """Planejador do império: projeções agregadas e medidas sugeridas."""
+        colonies = list(f.colonies.values())
+        total_pop = sum(p.population for p in colonies)
+        total_capacity = sum(p.growth_projection()['max_pop']
+                             for p in colonies)
+        average_stage = (sum(p.terraforming_stage() for p in colonies)
+                         / len(colonies)) if colonies else 0.0
+        food_surplus = sum(p.food_balance() for p in colonies)
+        queued = sum(len(p.queued_tasks()) for p in colonies)
+        building = sum(1 for p in colonies if p.building_progress())
+
+        self._panel_buttons.append(_FakeLabel(
+            (x0, y, w, 18), "PLANO IMPERIAL", self.f_small, color=C.ACCENT))
+        y += 20
+        self._panel_buttons.append(_FakeBar(
+            (x0 + 4, y, w - 8, 12),
+            total_pop / max(1e-6, total_capacity), C.SELECTED, self.f_small,
+            f"população {format_population(total_pop)} / "
+            f"{format_population(total_capacity)}"))
+        y += 16
+        self._panel_buttons.append(_FakeBar(
+            (x0 + 4, y, w - 8, 12), average_stage, C.PLANET_MINE, self.f_small,
+            f"terraformação média {average_stage * 100:.0f}% (estéril → Gaia)"))
+        y += 18
+        self._panel_buttons.append(_FakeLabel(
+            (x0 + 4, y, w, 16),
+            f"alimento líquido {food_surplus:+.0f}/ano · obras {building} · "
+            f"fila {queued}",
+            self.f_small,
+            color=C.PLANET_FREE_GOOD if food_surplus >= 0 else C.PLANET_ENEMY))
+        y += 20
+
+        recommendations = self._colony_recommendations(f)
+        self._planner_actions = recommendations
+        self._panel_buttons.append(_FakeLabel(
+            (x0, y, w, 16), f"RECOMENDAÇÕES  ·  {len(recommendations)}",
+            self.f_small, color=C.ACCENT))
+        y += 18
+        if not recommendations:
+            self._panel_buttons.append(_FakeLabel(
+                (x0 + 6, y, w - 6, 16),
+                "Império equilibrado — nenhuma medida pendente.", self.f_small))
+            y += 20
+        else:
+            for _, text, action, label in recommendations:
+                lines = self._wrap_label(text, 44)
+                height = 13 * len(lines)
+                self._panel_buttons.append(_FakeLabel(
+                    (x0 + 6, y, w - 74, height),
+                    "\n".join(lines), self.f_small))
+                if action is not None:
+                    self._panel_buttons.append(Button(
+                        (x0 + w - 66, y, 62, 20), label, action))
+                y += max(22, height + 6)
+            self._panel_buttons.append(Button(
+                (x0 + 4, y, w - 8, 24), "Aplicar todas as medidas",
+                self._apply_all_recommendations,
+                enabled=lambda: any(
+                    action is not None
+                    for _, _, action, _ in self._planner_actions)))
+            y += 30
+        return y
+
+    @staticmethod
+    def _wrap_label(text, width):
+        words = str(text).split()
+        lines, current = [], ''
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if len(candidate) > width and current:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines or ['']
 
     def _select_colony(self, planet):
         self.selected_star = planet.parent_star
@@ -547,6 +1121,7 @@ class GameUI:
         elif self.active_tab == 'fleet':
             viewport = self._panel_viewport()
             y = viewport.top + 8
+            y = self._draw_fleet_manager(f, x0, w, y)
             groups = (
                 ("EXPLORAÇÃO", Scout),
                 ("COLONIZAÇÃO", ColonyShip),
@@ -601,9 +1176,16 @@ class GameUI:
 
         elif self.active_tab == 'colonies':
             viewport = self._panel_viewport()
+            x0 = viewport.left
+            w = viewport.width - 2
             y = viewport.top + 8
             colonies = sorted(f.colonies.values(), key=lambda p: p.name)
             home = f.home_planet
+            selected = self.selected_planet
+            if (selected is not None and selected.is_colonized
+                    and selected.faction is f):
+                y = self._draw_colony_manager(f, selected, x0, w, y)
+            y = self._draw_colony_planner(f, x0, w, y)
             sections = (
                 ("CAPITAL", [p for p in colonies if p is home]),
                 ("COLÔNIAS", [p for p in colonies if p is not home]),
@@ -620,11 +1202,15 @@ class GameUI:
                     y += 20
                     continue
                 for planet in members:
-                    self._panel_buttons.append(Button(
+                    button = Button(
                         (x0 + 4, y, w - 12, 24), planet.name,
                         lambda selected=planet: self._select_colony(selected),
-                    ))
+                    )
+                    button._active = planet is self.selected_planet
+                    self._panel_buttons.append(button)
                     y += 25
+                    info = planet.expansion_info()
+                    stage = planet.terraforming_stage()
                     self._panel_buttons.append(_FakeLabel(
                         (x0 + 10, y, w - 18, 16),
                         f"{planet.parent_star.name}  ·  pop "
@@ -634,8 +1220,10 @@ class GameUI:
                     y += 14
                     self._panel_buttons.append(_FakeLabel(
                         (x0 + 10, y, w - 18, 16),
-                        f"exp {planet.terraform_level}  ·  "
-                        f"hab {getattr(planet, 'habitats', 0)}",
+                        f"{self._stage_label(stage)} {stage * 100:.0f}%  ·  "
+                        f"exp {info['level']}/{info['max']}  ·  "
+                        f"hab {planet.habitats}  ·  "
+                        f"foco {self._focus_label(planet)[:6]}",
                         self.f_small))
                     y += 20
             self._panel_content_height = y - viewport.top
@@ -895,6 +1483,8 @@ class GameUI:
                 self.off_x -= dx
                 self.off_y -= dy
                 self.last_mouse = (mx, my)
+            if self._marquee is not None:
+                self._marquee[1] = (mx, my)
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1:
@@ -921,9 +1511,16 @@ class GameUI:
                             return
                 if (event.pos[0] < self.W - self.PANEL_W
                         and event.pos[1] > self.TOP_H):
-                    self._handle_map_click(event.pos)
+                    self._handle_map_click(
+                        event.pos,
+                        additive=bool(
+                            pygame.key.get_mods() & pygame.KMOD_SHIFT))
                     self.dragging = True
                     self.last_mouse = event.pos
+            elif event.button == 3:
+                if (event.pos[0] < self.W - self.PANEL_W
+                        and event.pos[1] > self.TOP_H):
+                    self._handle_map_right_click(event.pos)
             elif event.button == 4:
                 if event.pos[0] >= self.W - self.PANEL_W:
                     self._scroll_active_panel(-48)
@@ -945,6 +1542,10 @@ class GameUI:
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             self.dragging = False
 
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 3:
+            self._finish_marquee(
+                additive=bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
+
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_SPACE:
                 self._toggle_pause()
@@ -965,7 +1566,7 @@ class GameUI:
         self.off_x = wx - (pos[0] - self.W / 2) / self.zoom
         self.off_y = wy - (pos[1] - self.H / 2) / self.zoom
 
-    def _handle_map_click(self, pos):
+    def _object_at(self, pos):
         wx, wy = self.screen_to_world(*pos)
         best_obj, best_dist = None, float('inf')
         for s in self.state.stars:
@@ -978,11 +1579,58 @@ class GameUI:
                 d = math.dist((wx, wy), p.abs_position) * self.zoom
                 if d < 8 and d < best_dist:
                     best_obj, best_dist = (s, p), d
+        return best_obj
+
+    def _handle_map_click(self, pos, additive=False):
+        ship = self._ship_at(pos)
+        if ship is not None:
+            if additive:
+                self._toggle_ship_selection(ship)
+            else:
+                self._set_ship_selection([ship])
+            self._rebuild_panel_buttons()
+            return
+        best_obj = self._object_at(pos)
         if best_obj:
             self.selected_star, self.selected_planet = best_obj
             self.player.select(*best_obj)
             self._rebuild_panel_buttons()
             self._rebuild_action_buttons()
+        elif not additive:
+            self._set_ship_selection([])
+            self._rebuild_panel_buttons()
+
+    def _handle_map_right_click(self, pos):
+        """Botão direito: ordem de movimento sobre o alvo, ou cerco de seleção."""
+        if self.selected_ships:
+            target = self._object_at(pos)
+            if target is not None:
+                self._order_ships('move', star=target[0])
+                return
+        self._marquee = [pos, pos]
+
+    def _finish_marquee(self, additive=False):
+        if self._marquee is None:
+            return
+        first, second = self._marquee
+        self._marquee = None
+        rect = pygame.Rect(
+            min(first[0], second[0]), min(first[1], second[1]),
+            abs(second[0] - first[0]), abs(second[1] - first[1]))
+        if rect.width < 6 and rect.height < 6:
+            return
+        found = self._ships_in_rect(rect)
+        if not found:
+            if not additive:
+                self._set_ship_selection([])
+            return
+        if additive:
+            self._set_ship_selection(
+                list(dict.fromkeys(self.selected_ships + found)))
+        else:
+            self._set_ship_selection(found)
+        self.log_msg(f"{len(self.selected_ships)} naves selecionadas")
+        self._rebuild_panel_buttons()
 
     def _rebuild_action_buttons(self):
         self._action_buttons = []
@@ -1210,16 +1858,39 @@ class GameUI:
         self.screen.blit(surf, (0, 0))
 
     def _draw_grid(self):
-        step = 100
-        x0 = int(self.off_x - self.W / 2 / self.zoom)
-        y0 = int(self.off_y - self.H / 2 / self.zoom)
-        for gx in range(x0 - x0 % step,
-                        x0 + int(self.W / self.zoom) + step, step):
-            for gy in range(y0 - y0 % step,
-                            y0 + int(self.H / self.zoom) + step, step):
-                sx, sy = self.world_to_screen(gx, gy)
-                if 0 <= sx < self.W - self.PANEL_W and 0 <= sy < self.H:
-                    pygame.draw.circle(self.screen, C.GRID, (sx, sy), 1)
+        zoom = self.zoom
+        step = self.GRID_BASE_STEP
+        spacing = step * zoom
+        # Coarsen the lattice when zoomed far out so on-screen dot spacing
+        # stays readable and the number of draw calls stays bounded. At
+        # normal zoom (spacing >= GRID_MIN_PX) the grid is unchanged.
+        while spacing < self.GRID_MIN_PX:
+            step *= 2
+            spacing = step * zoom
+        map_w = self.W - self.PANEL_W
+        left = self.off_x - self.W / 2 / zoom
+        top = self.off_y - self.H / 2 / zoom
+        first_gx = math.floor(left / step) * step
+        first_gy = math.floor(top / step) * step
+        cx0 = self.W / 2 - self.off_x * zoom
+        cy0 = self.H / 2 - self.off_y * zoom
+        screen = self.screen
+        draw_circle = pygame.draw.circle
+        color = C.GRID
+        gy = first_gy
+        sy = gy * zoom + cy0
+        while sy < self.H:
+            if sy >= 0:
+                sx = first_gx * zoom + cx0
+                gx = first_gx
+                while sx < map_w:
+                    if sx >= 0:
+                        draw_circle(screen, color, (int(sx), int(sy)), 1)
+                    gx += step
+                    sx = gx * zoom + cx0
+            gy += step
+            sy = gy * zoom + cy0
+
 
     def _draw_stars_and_planets(self):
         for s in self.state.stars:
@@ -1345,7 +2016,7 @@ class GameUI:
         for s in self.faction.ships.copy().values():
             if not s.alive:
                 continue
-            self._draw_ship_sprite(s, s is self.player.selected_ship)
+            self._draw_ship_sprite(s, s in self.selected_ships)
         for f in self.state.factions:
             if f is self.faction or f.eliminated:
                 continue
@@ -1353,6 +2024,52 @@ class GameUI:
                 if not s.alive:
                     continue
                 self._draw_ship_sprite(s, False)
+        self._draw_order_markers()
+        self._draw_marquee()
+
+    def _draw_order_markers(self):
+        """Rota tracejada até o alvo das ordens manuais pendentes."""
+        for ship in self._own_ships():
+            order = ship.order
+            if order is None or order['kind'] != 'move':
+                continue
+            star = order['star']
+            if star is None:
+                continue
+            start = self.world_to_screen(*ship.abs_position)
+            end = self.world_to_screen(*star.position)
+            self._draw_dashed_line(start, end, C.SELECTED)
+            pygame.draw.circle(self.screen, C.SELECTED, end, 6, 1)
+
+    def _draw_marquee(self):
+        if self._marquee is None:
+            return
+        first, second = self._marquee
+        rect = pygame.Rect(
+            min(first[0], second[0]), min(first[1], second[1]),
+            abs(second[0] - first[0]), abs(second[1] - first[1]))
+        pygame.draw.rect(self.screen, C.SELECTED, rect, 1)
+        shade = pygame.Surface(rect.size, pygame.SRCALPHA)
+        shade.fill((124, 224, 255, 26))
+        self.screen.blit(shade, rect.topleft)
+
+    def _rotated_ship_sprite(self, filename, color, size, heading):
+        """Sprite virado para o rumo do voo, em passos de 15 graus."""
+        step = 360.0 / self.SHIP_HEADING_STEPS
+        index = 0
+        if heading is not None:
+            rotation = -math.degrees(heading) - 90.0
+            index = int(round(rotation / step)) % self.SHIP_HEADING_STEPS
+        key = (filename, color, size, index)
+        sprite = self._ship_sprite_cache.get(key)
+        if sprite is None:
+            base = get_ship_sprite(filename, color, (size, size))
+            sprite = (base if index == 0
+                      else pygame.transform.rotate(base, index * step))
+            if len(self._ship_sprite_cache) > 768:
+                self._ship_sprite_cache.clear()
+            self._ship_sprite_cache[key] = sprite
+        return sprite
 
     def _draw_ship_sprite(self, ship, selected):
         sx, sy = self.world_to_screen(*ship.abs_position)
@@ -1366,9 +2083,9 @@ class GameUI:
         size = min(36, max(
             14, round(base_size * min(
                 1.6, max(0.8, math.pow(self.zoom, 0.25))))))
-        sprite = get_ship_sprite(
+        sprite = self._rotated_ship_sprite(
             design['sprite'], self._hex_to_rgb(ship.faction.color),
-            (size, size),
+            size, getattr(ship, 'heading', None),
         )
         self.screen.blit(sprite, sprite.get_rect(center=(sx, sy)))
         if selected:
@@ -1507,18 +2224,23 @@ class GameUI:
                 f"FROTA ({len(f.ships)})", True, C.ACCENT), (x0 + 10, y))
             self.screen.blit(self.f_small.render(
                 f"Ativas: {sum(1 for ship in f.ships.copy().values() if ship.alive)}"
-                f"  ·  Colonizadores ociosos: "
-                f"{len(f.idle_colony_ships())}",
+                f"  ·  Ociosas: {len(f.idle_colony_ships())}"
+                f"  ·  Selecionadas: {len(self.selected_ships)}",
                 True, C.DIM), (x0 + 10, y + 20))
+            self.screen.blit(self.f_small.render(
+                "Botão direito move a seleção; arraste para cercar.",
+                True, C.DIM), (x0 + 10, y + 34))
 
         elif self.active_tab == 'colonies':
-            population = sum(
-                planet.population for planet in f.colonies.values())
+            colonies = list(f.colonies.values())
+            population = sum(planet.population for planet in colonies)
+            food = sum(planet.food_balance() for planet in colonies)
             self.screen.blit(self.f_med.render(
-                f"COLÔNIAS ({len(f.colonies)})", True, C.ACCENT),
+                f"COLÔNIAS ({len(colonies)})", True, C.ACCENT),
                 (x0 + 10, y))
             self.screen.blit(self.f_small.render(
-                f"População total: {format_population(population)}",
+                f"Pop {format_population(population)} · alim {food:+.0f}/ano "
+                f"· clique p/ gerir",
                 True, C.DIM), (x0 + 10, y + 20))
 
         elif self.active_tab == 'build':
@@ -1565,9 +2287,12 @@ class GameUI:
                         (0, y0), (self.W - self.PANEL_W, y0))
 
         if not self.selected_star:
-            self.screen.blit(self.f.render(
-                "Clique em estrela/planeta — aba Sistema/Guerra controla tudo",
-                True, C.DIM), (12, y0 + 12))
+            hint = ("Clique em estrela/planeta — aba Sistema/Guerra "
+                    "controla tudo")
+            if self.selected_ships:
+                hint = (f"{len(self.selected_ships)} naves selecionadas — "
+                        "botão direito numa estrela dá a ordem de movimento")
+            self.screen.blit(self.f.render(hint, True, C.DIM), (12, y0 + 12))
             return
 
         s = self.selected_star
@@ -1677,8 +2402,10 @@ class GameUI:
         planet_type = planet_type_of(planet)
         rings = bool(getattr(planet, 'has_rings', False))
         habitats = int(getattr(planet, 'habitats', 0))
+        greening = round(getattr(
+            planet, 'terraforming_stage', lambda: 1.0)(), 2)
         key = (id(planet), suitability, size, lights, self.texture_detail,
-               planet_type, rings, habitats)
+               planet_type, rings, habitats, greening)
         if key not in self._planet_surfaces:
             star_name = (planet.parent_star.name
                          if planet.parent_star is not None else '')
@@ -1686,7 +2413,7 @@ class GameUI:
             self._planet_surfaces[key] = generate_planet_surface(
                 planet.life_suitability, seed, size, city_lights=lights,
                 detail_level=self.texture_detail, planet_type=planet_type,
-                rings=rings, habitats=habitats)
+                rings=rings, habitats=habitats, greening=greening)
         return self._planet_surfaces[key]
 
     def _map_planet_surface(self, planet, size):
@@ -1698,7 +2425,8 @@ class GameUI:
         key = (id(planet), suitability, size, lights, self.texture_detail,
                planet_type_of(planet), bool(getattr(planet, 'has_rings',
                                                    False)),
-               int(getattr(planet, 'habitats', 0)))
+               int(getattr(planet, 'habitats', 0)),
+               round(getattr(planet, 'terraforming_stage', lambda: 1.0)(), 2))
         if key not in self._map_planet_surfaces:
             render_size = min(512, max(64, 1 << (size - 1).bit_length()))
             surface = self._planet_surface(planet, render_size)

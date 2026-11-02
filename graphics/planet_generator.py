@@ -15,6 +15,55 @@ SUITABILITY_STYLES = {
     'Robot': ((57, 69, 92), (142, 155, 176), (236, 190, 103)),
 }
 
+# Mundos estéreis: rocha, poeira e planícies secas — o retrato "Gaia" é
+# alcançado gradualmente conforme a colônia terraforma o planeta.
+BARREN_PALETTES = (
+    ((96, 88, 78), (143, 130, 111), (58, 52, 46)),
+    ((88, 74, 66), (138, 112, 94), (52, 42, 36)),
+    ((78, 82, 92), (121, 127, 139), (46, 50, 58)),
+    ((104, 92, 68), (154, 135, 98), (64, 54, 40)),
+)
+
+# Paleta "Gaia" usada para acelerar o verdejo em mundos hostis.
+GAIA_LAND_RGB = (58, 128, 84)
+GAIA_WATER_RGB = (36, 96, 140)
+GAIA_GIANT_LIGHT = (158, 206, 178)
+GAIA_GIANT_DARK = (58, 116, 118)
+GAIA_GIANT_STORM = (226, 244, 226)
+
+
+def barren_palette(seed: str) -> tuple[tuple[int, int, int], ...]:
+    """(planície, alto, bacia seca) de um mundo sem vida."""
+    generator = random.Random(_stable_seed(f"{seed}:barren"))
+    return BARREN_PALETTES[generator.randrange(len(BARREN_PALETTES))]
+
+
+def _growth_factor(greening: float) -> float:
+    """Curva de transição estéril → Gaia (0 rocha, 1 vida plena)."""
+    t = min(1.0, max(0.0, (greening - 0.10) / 0.82))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _resolve_greening(greening, suitability) -> float:
+    if greening is None:
+        return greening_from_suitability(suitability)
+    return min(1.0, max(0.0, float(greening)))
+
+
+def _mix_rgb(left: tuple[int, int, int], right: tuple[int, int, int],
+             ratio: float) -> tuple[int, int, int]:
+    """Blend two RGB triples; ratio 0 devolve a esquerda, 1 a direita."""
+    ratio = min(1.0, max(0.0, ratio))
+    return tuple(
+        int(round(left[axis] * (1.0 - ratio) + right[axis] * ratio))
+        for axis in range(3))
+
+
+def greening_from_suitability(suitability) -> float:
+    """Retrato mínimo de um mundo apenas pela sua habitabilidade natural."""
+    best = max(suitability.values(), default=0.0) if suitability else 0.0
+    return min(1.0, 0.18 + 0.42 * best)
+
 
 def generate_suitability_profile(
         rng: random.Random | None = None) -> dict[str, float]:
@@ -691,23 +740,31 @@ def generate_planet_surface(
         suitability: Mapping[str, float], seed: str,
         size: int = 96, city_lights: float = 0.0,
         detail_level: int = 3, planet_type: str = 'terrestrial',
-        rings: bool = False, habitats: int = 0) -> pygame.Surface:
+        rings: bool = False, habitats: int = 0,
+        greening: float | None = None) -> pygame.Surface:
     """Render a repeatable, randomly textured 2D planet for a world."""
+    stage = (_resolve_greening(greening, suitability)
+             if planet_type == 'terrestrial'
+             else (1.0 if greening is None else min(
+                 1.0, max(0.0, float(greening)))))
+    growth = _growth_factor(stage)
     if planet_type == 'gas_giant':
         return generate_gas_giant_surface(
             seed, size, detail_level, rings=rings,
-            city_lights=city_lights, habitats=habitats)
+            city_lights=city_lights, habitats=habitats,
+            greening=stage)
     if planet_type == 'asteroid':
         return generate_asteroid_surface(
             seed, size, detail_level, city_lights=city_lights,
-            habitats=habitats)
+            habitats=habitats, greening=stage)
     if size < 16:
         raise ValueError("Planet surfaces must be at least 16 pixels wide")
     if not isinstance(detail_level, int) or not 1 <= detail_level <= 8:
         raise ValueError("Texture detail must be an integer from 1 to 8")
 
     texture = generate_planet_texture(
-        suitability, seed, (size * 2, size), detail_level=detail_level)
+        suitability, seed, (size * 2, size), detail_level=detail_level,
+        greening=stage)
     texture_pixels = _surface_array(texture)
     center = size // 2
     radius = int(size * 0.43)
@@ -744,7 +801,8 @@ def generate_planet_surface(
         sample_x, sample_y,
     ) / 255.0
     sun_face = np.maximum(0.0, illumination)
-    cloud_opacity = cloud_alpha * (0.22 + 0.58 * sun_face)
+    cloud_opacity = cloud_alpha * (0.22 + 0.58 * sun_face) * (
+        0.10 + 0.90 * growth)
     shaded = (
         shaded * (1.0 - cloud_opacity[..., None])
         + np.asarray((205, 222, 235), dtype=np.float32)
@@ -763,7 +821,7 @@ def generate_planet_surface(
         & (1.0 - cloud_opacity > 0.5))
     shaded += (
         np.asarray((210.0, 232.0, 255.0), dtype=np.float32)
-        * (specular * ocean_like * daylight)[..., None] * 0.45)
+        * (specular * ocean_like * daylight)[..., None] * 0.45 * growth)
     if city_lights > 0:
         city_texture = generate_city_light_texture(
             suitability, seed, (texture.get_width(), texture.get_height()),
@@ -783,9 +841,9 @@ def generate_planet_surface(
             shaded * (1.0 - city_alpha[..., None])
             + city_pixels * city_alpha[..., None] * 1.15
         )
-    # Aro atmosférico (Fresnel): azul strengthened na borda, lado diurno.
+    # Aro atmosférico (Fresnel): só ganha azul quem tem atmosfera.
     fresnel = np.clip(1.0 - nz, 0.0, 1.0) ** 2.6 * mask
-    rim = fresnel * (0.15 + 0.85 * daylight)
+    rim = fresnel * (0.15 + 0.85 * daylight) * (0.15 + 0.85 * growth)
     shaded += (
         np.asarray((120.0, 170.0, 255.0), dtype=np.float32)
         * rim[..., None] * 0.5)
@@ -799,13 +857,16 @@ def generate_planet_surface(
 
     _, _, highlight_color = SUITABILITY_STYLES[
         dominant_suitability(suitability)]
+    ring_color = _mix_rgb((148, 146, 142), highlight_color, growth)
     pygame.draw.arc(
-        sphere, highlight_color,
+        sphere, ring_color,
         (center - radius + 2, center - radius + 2,
          radius * 2 - 4, radius * 2 - 4),
         3.8, 5.7, max(1, size // 32),
     )
-    pygame.draw.circle(sphere, (196, 227, 255), (center, center), radius, 1)
+    pygame.draw.circle(
+        sphere, _mix_rgb((150, 150, 152), (196, 227, 255), growth),
+        (center, center), radius, 1)
     if habitats:
         _draw_habitat_dots(
             sphere, seed, center,
@@ -817,12 +878,15 @@ def generate_planet_texture(
         suitability: Mapping[str, float], seed: str,
         size: tuple[int, int] = (256, 128),
         detail_level: int = 3,
-        planet_type: str = 'terrestrial') -> pygame.Surface:
+        planet_type: str = 'terrestrial',
+        greening: float | None = None) -> pygame.Surface:
     """Create a repeatable equirectangular surface for 3D planet rendering."""
     if planet_type == 'gas_giant':
-        return generate_gas_giant_texture(seed, size, detail_level)
+        return generate_gas_giant_texture(
+            seed, size, detail_level, greening=greening)
     if planet_type == 'asteroid':
-        return generate_asteroid_texture(seed, size, detail_level)
+        return generate_asteroid_texture(
+            seed, size, detail_level, greening=greening)
     width, height = size
     if width < 32 or height < 16:
         raise ValueError("Planet textures must be at least 32x16 pixels")
@@ -856,12 +920,30 @@ def generate_planet_texture(
     color = ocean * (1.0 - land_mask[..., None]) + (
         land * land_mask[..., None])
 
+    # Estéril → Gaia: rocha seca e bacias salgadas dão lugar ao azul e ao
+    # verde conforme a terraformação avança.
+    stage = _resolve_greening(greening, suitability)
+    growth = _growth_factor(stage)
+    if growth < 1.0:
+        plain_rgb, highland_rgb, basin_rgb = (
+            np.asarray(channel, dtype=np.float32)
+            for channel in barren_palette(seed))
+        barren = plain_rgb * (1.0 - land_mask[..., None]) + (
+            highland_rgb * land_mask[..., None])
+        barren = barren * (0.80 + 0.42 * terrain_variation[..., None])
+        barren = barren * (1.0 - ocean_depth[..., None] * 0.45) + (
+            basin_rgb * ocean_depth[..., None] * 0.45)
+        color = barren * (1.0 - growth) + color * growth
+
     polar_ice = np.clip(
         (np.abs(latitude) - 0.96
          + (terrain_variation - 0.5) * 0.11) / 0.08,
         0.0, 1.0,
     )
     ice_color = np.asarray((194, 222, 231), dtype=np.float32)
+    if growth < 1.0:
+        # Sem atmosfera espessa os polos retêm menos gelo brilhante.
+        polar_ice *= 0.35 + 0.65 * growth
     color = color * (1.0 - polar_ice[..., None]) + (
         ice_color * polar_ice[..., None])
 
@@ -905,7 +987,8 @@ def gas_giant_palette(seed: str) -> tuple[tuple[int, int, int], ...]:
 
 def generate_gas_giant_texture(
         seed: str, size: tuple[int, int] = (256, 128),
-        detail_level: int = 3) -> pygame.Surface:
+        detail_level: int = 3,
+        greening: float | None = None) -> pygame.Surface:
     """Banded equirectangular texture with turbulence and storm ovals."""
     width, height = _check_texture_arguments(size, detail_level)
     x, y, z = _sphere_coordinates((width, height))
@@ -928,6 +1011,16 @@ def generate_gas_giant_texture(
 
     light_rgb = np.asarray(light_band, dtype=np.float32)
     dark_rgb = np.asarray(dark_band, dtype=np.float32)
+    storm_rgb = np.asarray(storm_color, dtype=np.float32)
+    growth = _growth_factor(1.0 if greening is None else greening)
+    if growth < 1.0:
+        # Gigante gasoso terraformado: as bandas tendem ao verde-azulado.
+        light_rgb = light_rgb * (1.0 - growth) + np.asarray(
+            GAIA_GIANT_LIGHT, dtype=np.float32) * growth
+        dark_rgb = dark_rgb * (1.0 - growth) + np.asarray(
+            GAIA_GIANT_DARK, dtype=np.float32) * growth
+        storm_rgb = storm_rgb * (1.0 - growth) + np.asarray(
+            GAIA_GIANT_STORM, dtype=np.float32) * growth
     color = dark_rgb * (1.0 - band[..., None]) + (
         light_rgb * band[..., None])
     color *= (0.86 + 0.28 * turbulence)[..., None]
@@ -947,7 +1040,7 @@ def generate_gas_giant_texture(
         delta_lat = (latitude - center_lat) / radius_y
         blob = np.clip(
             1.0 - delta_lon ** 2 - delta_lat ** 2, 0.0, 1.0) ** 2
-        tint = (np.asarray(storm_color, dtype=np.float32) if major
+        tint = (storm_rgb if major
                 else light_rgb * generator.uniform(0.9, 1.1))
         strength = 0.9 if major else 0.55
         color = color * (1.0 - blob[..., None] * strength) + (
@@ -963,7 +1056,8 @@ def generate_gas_giant_texture(
 
 def generate_asteroid_texture(
         seed: str, size: tuple[int, int] = (256, 128),
-        detail_level: int = 3) -> pygame.Surface:
+        detail_level: int = 3,
+        greening: float | None = None) -> pygame.Surface:
     """Cratered grey-brown equirectangular texture for belt bodies."""
     width, height = _check_texture_arguments(size, detail_level)
     x, y, z = _sphere_coordinates((width, height))
@@ -999,6 +1093,19 @@ def generate_asteroid_texture(
         color = color + (bright_rgb - color) * (
             rim[..., None] * 0.28)
 
+    growth = _growth_factor(1.0 if greening is None else greening)
+    if growth < 1.0:
+        # Asteroide terraformado: regolito coberto por líquens e vegetação
+        # rasteira, com a água a encher as bacias de impacto.
+        vegetated = (color * 0.34
+                     + np.asarray(GAIA_LAND_RGB, dtype=np.float32) * 0.66)
+        vegetated *= (0.82 + 0.36 * mottle[..., None])
+        pools = np.clip((0.55 - mottle) * 2.2, 0.0, 1.0)
+        vegetated = vegetated * (1.0 - pools[..., None] * 0.55) + (
+            np.asarray(GAIA_WATER_RGB, dtype=np.float32)
+            * pools[..., None] * 0.55)
+        color = color * (1.0 - growth) + vegetated * growth
+
     rgb = np.clip(color, 0, 255).astype(np.uint8)
     return pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
 
@@ -1028,6 +1135,7 @@ def _shaded_sphere_from_texture(
         lights: pygame.Surface | None = None,
         lights_strength: float = 0.0,
         rim_color: tuple[int, int, int] | None = None,
+        rim_strength: float = 1.0,
         ) -> pygame.Surface:
     """Project an equirectangular texture onto a (possibly lumpy) disc."""
     texture_pixels = _surface_array(texture)
@@ -1051,9 +1159,9 @@ def _shaded_sphere_from_texture(
     shaded = _sample_pixels_bilinear(
         texture_pixels, sample_x, sample_y) * brightness[..., None]
 
-    if rim_color is not None:
+    if rim_color is not None and rim_strength > 0:
         fresnel = np.clip(1.0 - nz, 0.0, 1.0) ** 2.6 * mask
-        rim = fresnel * (0.15 + 0.85 * daylight)
+        rim = fresnel * (0.15 + 0.85 * daylight) * rim_strength
         shaded += (
             np.asarray(rim_color, dtype=np.float32)
             * rim[..., None] * 0.5)
@@ -1088,12 +1196,15 @@ def _shaded_sphere_from_texture(
 def generate_gas_giant_surface(
         seed: str, size: int = 96, detail_level: int = 3,
         rings: bool = False, city_lights: float = 0.0,
-        habitats: int = 0) -> pygame.Surface:
+        habitats: int = 0, greening: float | None = None) -> pygame.Surface:
     """Render a banded gas giant, optionally with a ring system."""
     if size < 16:
         raise ValueError("Planet surfaces must be at least 16 pixels wide")
+    growth = _growth_factor(
+        1.0 if greening is None else min(1.0, max(0.0, float(greening))))
     texture = generate_gas_giant_texture(
-        seed, (size * 2, size), detail_level=detail_level)
+        seed, (size * 2, size), detail_level=detail_level,
+        greening=greening)
     center = size // 2
     radius = int(size * 0.43)
     lights = None
@@ -1104,11 +1215,11 @@ def generate_gas_giant_surface(
     body = _shaded_sphere_from_texture(
         texture, size, radius, center, 0.15, lights=lights,
         lights_strength=math.pow(min(1.0, max(0.0, city_lights)), 0.4),
-        rim_color=(150, 180, 225))
+        rim_color=(150, 180, 225), rim_strength=0.25 + 0.75 * growth)
 
     _, _, highlight = gas_giant_palette(seed)
     pygame.draw.arc(
-        body, highlight,
+        body, _mix_rgb((152, 150, 148), highlight, growth),
         (center - radius + 2, center - radius + 2,
          radius * 2 - 4, radius * 2 - 4),
         3.8, 5.7, max(1, size // 32),
@@ -1149,12 +1260,16 @@ def generate_gas_giant_surface(
 
 def generate_asteroid_surface(
         seed: str, size: int = 64, detail_level: int = 3,
-        city_lights: float = 0.0, habitats: int = 0) -> pygame.Surface:
+        city_lights: float = 0.0, habitats: int = 0,
+        greening: float | None = None) -> pygame.Surface:
     """Render a cratered, irregularly shaped asteroid body."""
     if size < 16:
         raise ValueError("Planet surfaces must be at least 16 pixels wide")
+    growth = _growth_factor(
+        1.0 if greening is None else min(1.0, max(0.0, float(greening))))
     texture = generate_asteroid_texture(
-        seed, (size * 2, size), detail_level=detail_level)
+        seed, (size * 2, size), detail_level=detail_level,
+        greening=greening)
     center = size // 2
     base_radius = int(size * 0.34)
     x_grid, y_grid = np.meshgrid(
@@ -1169,9 +1284,11 @@ def generate_asteroid_surface(
             seed, (texture.get_width(), texture.get_height()),
             detail_level, style='asteroid')
     body = _shaded_sphere_from_texture(
-        texture, size, radius, center, 0.06, lights=lights,
+        texture, size, radius, center, 0.06 + 0.10 * growth, lights=lights,
         lights_strength=math.pow(min(1.0, max(0.0, city_lights)), 0.4),
-        rim_color=(120, 140, 170) if habitats or city_lights else None)
+        rim_color=(120, 140, 170) if (
+            habitats or city_lights or growth > 0.55) else None,
+        rim_strength=0.15 + 0.85 * growth)
     if habitats:
         _draw_habitat_dots(
             body, seed, center,

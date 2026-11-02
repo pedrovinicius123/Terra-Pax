@@ -50,6 +50,8 @@ class GameState:
         self.tick_interval = tick_interval
         self.lock = threading.RLock()
         self._thread = None
+        self._last_tick_wall = time.monotonic()
+        self._tick_span = 0.0
         for f in factions:
             f.game_state = self
 
@@ -76,13 +78,35 @@ class GameState:
         
     def start(self):
         self.running = True
+        self._last_tick_wall = time.monotonic()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
+    def smooth_time(self):
+        """Tempo interpolado entre ticks, para animações contínuas a 60 FPS.
+
+        `time` avança em degraus (um por tick); navegação e animações usam
+        esta leitura contínua para não congelarem entre ticks.
+        """
+        if not self.running or self.paused or self.game_over:
+            return self.time
+        elapsed = time.monotonic() - self._last_tick_wall
+        span = max(self._tick_span, 1e-6)
+        fraction = min(1.0, max(0.0, elapsed / span))
+        return self.time + fraction * self.tick_interval * self.speed
+
     def _loop(self):
+        previous = time.monotonic()
         while self.running:
             if not self.paused and not self.game_over:
                 self.tick(self.tick_interval * self.speed)
+            now = time.monotonic()
+            span = now - previous
+            previous = now
+            if span > 0.0:
+                self._tick_span = (self._tick_span * 0.7 + span * 0.3
+                                   if self._tick_span > 0.0 else span)
+            self._last_tick_wall = now
             time.sleep(self.tick_interval)
 
     def tick(self, dt):
