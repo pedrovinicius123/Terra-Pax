@@ -1997,20 +1997,52 @@ class GameUI:
         length = math.hypot(dx, dy)
         if length < 1:
             return
+        clip = self._clip_to_viewport(start[0], start[1], end[0], end[1])
+        if clip is None:
+            return
+        # Dash grid stays anchored to the true start; only the visible span is
+        # drawn, so zooming in no longer iterates thousands of off-screen px.
         dash_length, gap_length = 9, 6
-        offset = 0.0
-        while offset < length:
-            dash_end = min(length, offset + dash_length)
-            point_start = (
-                round(start[0] + dx * offset / length),
-                round(start[1] + dy * offset / length),
-            )
-            point_end = (
-                round(start[0] + dx * dash_end / length),
-                round(start[1] + dy * dash_end / length),
-            )
-            pygame.draw.line(self.screen, color, point_start, point_end, 1)
-            offset += dash_length + gap_length
+        period = dash_length + gap_length
+        lo, hi = clip[0] * length, clip[1] * length
+        offset = (lo // period) * period
+        ux, uy = dx / length, dy / length
+        while offset < hi:
+            a = max(offset, lo)
+            b = min(offset + dash_length, hi)
+            if a < b:
+                pygame.draw.line(
+                    self.screen, color,
+                    (round(start[0] + ux * a), round(start[1] + uy * a)),
+                    (round(start[0] + ux * b), round(start[1] + uy * b)), 1)
+            offset += period
+
+    def _clip_to_viewport(self, x0, y0, x1, y1):
+        """Liang-Barsky clip of a screen segment to the map rect.
+
+        Returns the (t0, t1) parameter bounds that fall inside the viewport, or
+        None when the whole segment is off-screen.
+        """
+        w, h = self.W, self.H
+        dx, dy = x1 - x0, y1 - y0
+        t0, t1 = 0.0, 1.0
+        for p, q in ((-dx, x0), (dx, w - x0), (-dy, y0), (dy, h - y0)):
+            if p == 0.0:
+                if q < 0.0:
+                    return None
+            else:
+                r = q / p
+                if p < 0.0:
+                    if r > t1:
+                        return None
+                    if r > t0:
+                        t0 = r
+                else:
+                    if r < t0:
+                        return None
+                    if r < t1:
+                        t1 = r
+        return t0, t1
 
     def _draw_ships(self):
         for s in self.faction.ships.copy().values():
