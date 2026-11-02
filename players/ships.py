@@ -2,8 +2,33 @@ import threading
 import time
 import math
 import random
-import numpy as np
 import networkx as nx
+
+# Cadência dos laços de espera das threads de nave. As posições são
+# interpoladas pelo getter abs_position a partir do relógio do jogo, então a
+# thread só precisa perceber chegada/ordem nesta granularidade — não a cada
+# quadro. Polling curto demais (20 ms) faz centenas de threads disputarem o
+# GIL e travar a renderização, sobretudo em 5x.
+SHIP_POLL = 0.12
+
+
+def _nearest_star(stars, px, py):
+    """Estrela mais próxima de (px, py) por distância ao quadrado.
+
+    Equivale ao argmin da norma L2 (ordenação idêntica), mas sem os
+    vetores NumPy de 2 elementos, que tinham custo desproporcional quando
+    chamados contra todas as estrelas em cada decisão de nave.
+    """
+    best = None
+    best_d = None
+    for s in stars:
+        dx = s.position[0] - px
+        dy = s.position[1] - py
+        d = dx * dx + dy * dy
+        if best_d is None or d < best_d:
+            best_d = d
+            best = s
+    return best
 
 
 TRAVEL_SCALE = 6.0  # meses_de_jogo = dist / (speed * TRAVEL_SCALE)
@@ -228,7 +253,7 @@ class Ship(threading.Thread):
             if progress >= 1.0:
                 self._complete_voyage(voyage)
                 return True
-            time.sleep(0.02)
+            time.sleep(SHIP_POLL)
         return False
 
     def travel_path(self, stars, on_arrive=None, activity=None,
@@ -269,7 +294,7 @@ class Ship(threading.Thread):
         if kind == 'hold':
             self.activity = "aguardando ordens"
             while self.running and self.alive and self.order is None:
-                time.sleep(0.05)
+                time.sleep(SHIP_POLL)
             self._wake.set()
             return True
         star = order['star']
@@ -299,7 +324,7 @@ class Ship(threading.Thread):
         while self.running and self.alive and self.order is None:
             if self._clock() - t0 >= seconds:
                 return
-            time.sleep(0.02)
+            time.sleep(SHIP_POLL)
 
     # ---------- movimento controlado pelo relógio global ----------
     def move_to_star(self, from_star, to_star):
@@ -316,10 +341,8 @@ class Ship(threading.Thread):
 
     def find_path_to_star(self, target_star):
         try:
-            pos = np.array(self.abs_position)
-            dists = [np.linalg.norm(pos - np.array(s.position))
-                     for s in self.total_stars]
-            current_star = self.total_stars[int(np.argmin(dists))]
+            pos = self.abs_position
+            current_star = _nearest_star(self.total_stars, pos[0], pos[1])
             if current_star is target_star:
                 return [target_star]
             path = nx.shortest_path(self.map_G, current_star.name,
@@ -384,9 +407,8 @@ class Scout(Ship):
                      if s.name not in self.faction.explored_stars]
         if not remaining:
             return None
-        pos = np.array(self.abs_position)
-        return min(remaining,
-                   key=lambda s: np.linalg.norm(pos - np.array(s.position)))
+        pos = self.abs_position
+        return _nearest_star(remaining, pos[0], pos[1])
 
 
 class ColonyShip(Ship):
@@ -774,7 +796,6 @@ class Warship(Ship):
                 enemy_stars.extend(f.controlled_stars.values())
         if not enemy_stars:
             return None
-        pos = np.array(self.abs_position)
-        return min(enemy_stars,
-                   key=lambda s: np.linalg.norm(pos - np.array(s.position)))
+        pos = self.abs_position
+        return _nearest_star(enemy_stars, pos[0], pos[1])
             
