@@ -7,9 +7,15 @@ from graphics.star import SIMULATION_STEP_YEARS
 from players.ships import Scout, ColonyShip, Transport, Warship
 from logistics.modules.logistics_manager import LogisticsManager
 
-RESEARCH_SCALE = 15.0
-BASE_COLONIZATION_RANGE = 600.0
-COLONIZATION_RANGE_PER_FTL_LEVEL = 100.0
+RESEARCH_SCALE = 1.0
+BASE_COLONIZATION_RANGE = 350.0
+COLONIZATION_RANGE_PER_FTL_LEVEL = 70.0
+
+# Custo base de um habitat orbital; escala com os já existentes no mundo.
+HABITAT_BASE_COST = {'Minerals': 250, 'Energy': 200, 'Electronics': 100,
+                     'Alloys': 60}
+HABITAT_COST_GROWTH = 0.6
+HABITAT_BUILD_TIME = 18.0  # meses de jogo
 
 TECH_CAPS = {
     'ftl': 20, 'exploration': 20, 'propulsion': 20,
@@ -55,6 +61,18 @@ GALACTIC_WONDERS = {
         'description': 'Aumenta em 50% a pesquisa.',
         'cost': {'Minerals': 1000, 'Energy': 1200, 'Electronics': 500,
                  'Alloys': 200, 'Credits': 100},
+    },
+    'terraforming': {
+        'name': 'Jardins de Éter',
+        'description': 'Acelera em 25% a expansão terraformadora.',
+        'cost': {'Minerals': 1400, 'Energy': 900, 'Electronics': 300,
+                 'Chemicals': 600, 'Credits': 150},
+    },
+    'habitat': {
+        'name': 'Cinturão de Vulcanos',
+        'description': 'Potencializa em 25% os efeitos dos habitats.',
+        'cost': {'Minerals': 1600, 'Energy': 800, 'Electronics': 450,
+                 'Alloys': 350, 'Credits': 150},
     },
     'standard': {
         'name': 'Monumento do Triunfo',
@@ -192,7 +210,7 @@ class Faction:
 
         # Toggles controlados por controller/UI
         self.auto_colonize = False
-        self.auto_terraform = False
+        self.auto_habitat = False
         self.eliminated = False
 
         # Reservas de alvos (colony ships em construção/em voo)
@@ -371,8 +389,9 @@ class Faction:
                             max_distance=None):
         """Escolhe planeta por suitability ajustada por distância.
 
-        score = suitability × (1 - 0.5 × dist/max_dist)
-        → planeta 2× mais próximo vale ~1.5× mais.
+        score = (0.1 + suitability) × (1 - 0.5 × dist/max_dist)
+        → mundos hostis (asteroides, gigantes gasosos) são colonizáveis
+        quando não há alternativa melhor; expansão eleva a suitability.
         """
         if not self.colonies:
             return None
@@ -398,7 +417,8 @@ class Faction:
                 if d > max_distance:
                     continue
                 suit = planet.get_suitability(self)
-                score = suit * (1.0 - 0.5 * min(1.0, d / max_distance))
+                score = ((0.1 + suit)
+                         * (1.0 - 0.5 * min(1.0, d / max_distance)))
                 if score > best_score:
                     best_score, best = score, (star, planet)
         return best
@@ -441,16 +461,68 @@ class Faction:
             return False
         return True
 
-    # ---------- Auto-terraformação ----------
-    def auto_terraform_step(self, threshold_minerals=400):
-        """Tenta terraformar uma colônia. Retorna True se agiu."""
-        if len(self.colonies) < 3: return False
-        if self.resources.get('Minerals', 0) < threshold_minerals:
+    # ---------- Habitats orbitais ----------
+    def habitat_cost(self, planet):
+        n = getattr(planet, 'habitats', 0) + getattr(
+            planet, 'habitat_building', False)
+        scale = 1.0 + HABITAT_COST_GROWTH * n
+        cost = {r: a * scale for r, a in HABITAT_BASE_COST.items()}
+        if 'habitat' in self.wonders:
+            cost = {r: a * 0.8 for r, a in cost.items()}
+        return {r: round(a, 1) for r, a in cost.items()}
+
+    def can_build_habitat(self, planet):
+        from graphics.star import HABITAT_MAX_PER_PLANET
+        return (planet is not None
+                and planet.is_colonized
+                and planet.faction is self
+                and planet.habitats < HABITAT_MAX_PER_PLANET
+                and not planet.habitat_building
+                and planet.can_afford(self.habitat_cost(planet)))
+
+    def build_habitat(self, planet=None):
+        """Enfileira a construção de um habitat na colônia indicada."""
+        if planet is None:
+            candidates = [
+                p for p in self.colonies.values()
+                if self.can_build_habitat(p)]
+            if not candidates:
+                return False
+            planet = max(candidates, key=lambda p: p.population)
+        if not self.can_build_habitat(planet):
             return False
+        planet.pay_cost(self.habitat_cost(planet))
+        self._recompute_resources()
+        planet.habitat_building = True
+        planet.const_queue.put({
+            'kind': 'habitat',
+            'build_time': HABITAT_BUILD_TIME,
+            'faction': self,
+            'id': f"HAB-{self.name[:3].upper()}-{planet.habitats + 1}",
+        })
+        return True
+
+    def auto_habitat_step(self):
+        """Constrói habitat na colônia mais pressionada (auto button/AI)."""
+        from graphics.star import HABITAT_MAX_PER_PLANET
+        best, best_pressure = None, 0.0
         for p in self.colonies.values():
-            if self.can_terraform(p):
-                return self.terraform(p)
-        return False
+            if p.habitats >= HABITAT_MAX_PER_PLANET or p.habitat_building:
+                continue
+            if not self.can_build_habitat(p):
+                continue
+            _, max_pop = p._compute_caps()
+            pressure = p.population / max(1.0, max_pop)
+            if pressure > best_pressure:
+                best, best_pressure = p, pressure
+        if best is None:
+            return False
+        return self.build_habitat(best)
+
+    def habitat_total(self):
+        return sum(getattr(p, 'habitats', 0)
+                   for p in self.colonies.values()
+                   if p.faction is self)
 
     # ---------- Scouts ----------
     def initialize_scout_manager(self, map_G, total_stars):
@@ -617,6 +689,9 @@ class Faction:
         planet.developement = 0.0
         planet.production = 1.0
         planet.can_build_ships = False
+        planet.habitats = 0
+        planet.habitat_building = False
+        planet.famine = 0.0
         # Zera recursos (foram consumidos na agonia)
         for k in planet.planet_resources:
             planet.planet_resources[k] = 0.0
@@ -650,32 +725,6 @@ class Faction:
                 self.game_state.log_event(f"{self.name} foi eliminada!")
 
         self._recompute_resources()
-        return True
-
-    # ---------- Terraformação ----------
-    def terraform_cost(self, planet):
-        lvl = getattr(planet, 'terraform_level', 0)
-        return {'Minerals': 150 * (lvl + 1),
-                'Energy': 80 * (lvl + 1),
-                'Chemicals': 40 * (lvl + 1),
-                'Electronics': 50 * (lvl + 1)}
-
-    def can_terraform(self, planet):
-        return (planet is not None
-                and planet.is_colonized
-                and planet.faction is self
-                and planet.terraform_level < planet.max_terraform_level
-                and self.can_afford(self.terraform_cost(planet)))
-
-    def terraform(self, planet):
-        if not self.can_terraform(planet):
-            return False
-        self.pay_cost(self.terraform_cost(planet))
-        planet.terraform_level += 1
-        for k in list(planet.life_suitability.keys()):
-            planet.life_suitability[k] = min(
-                1.0, planet.life_suitability[k] + 0.15)
-        planet.production *= 1.15
         return True
 
     # ---------- Diplomacia ----------

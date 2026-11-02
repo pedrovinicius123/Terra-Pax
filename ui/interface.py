@@ -17,6 +17,7 @@ from graphics.planet_generator import (
     generate_planet_surface,
 )
 from graphics.ship_sprites import get_ship_sprite
+from graphics.star import format_population
 from logistics.game_3d import PLANET_TYPE_LABELS, PlanetViewer3D, planet_type_of
 
 
@@ -378,21 +379,21 @@ class GameUI:
         else:
             self.log_msg("Nenhum colonizador ocioso")
 
-    def _terraform(self, planet):
-        if self.player.terraform(planet):
-            self.log_msg(f"Terraformando {planet.name}")
+    def _build_habitat(self, planet):
+        if self.player.build_habitat(planet):
+            self.log_msg(f"Habitat orbital em construção: {planet.name}")
             self._rebuild_panel_buttons()
         else:
-            self.log_msg("Recursos insuficientes")
+            self.log_msg("Habitat indisponível ou recursos insuficientes")
 
     def _toggle_auto_colonize(self):
         on = self.player.toggle_auto_colonize()
         self.log_msg(f"Auto-colonizar: {'ON' if on else 'OFF'}")
         self._rebuild_panel_buttons()
 
-    def _toggle_auto_terraform(self):
-        on = self.player.toggle_auto_terraform()
-        self.log_msg(f"Auto-terraform: {'ON' if on else 'OFF'}")
+    def _toggle_auto_habitat(self):
+        on = self.player.toggle_auto_habitat()
+        self.log_msg(f"Auto-habitat: {'ON' if on else 'OFF'}")
         self._rebuild_panel_buttons()
 
     def _declare_war(self, other):
@@ -462,10 +463,13 @@ class GameUI:
                         lambda: f.can_afford(DESIGNS['colony']['cost']))
             return ("—", lambda: None, lambda: False)
         if p.faction is f:
-            if p.terraform_level < p.max_terraform_level:
-                return ("Terraform",
-                        lambda pp=p: self._terraform(pp),
-                        lambda pp=p: f.can_terraform(pp))
+            from graphics.star import HABITAT_MAX_PER_PLANET
+            if p.habitat_building:
+                return ("habitat…", lambda: None, lambda: False)
+            if p.habitats < HABITAT_MAX_PER_PLANET:
+                return ("Habitat",
+                        lambda pp=p: self._build_habitat(pp),
+                        lambda pp=p: f.can_build_habitat(pp))
             return ("max", lambda: None, lambda: False)
         return None
 
@@ -624,9 +628,14 @@ class GameUI:
                     self._panel_buttons.append(_FakeLabel(
                         (x0 + 10, y, w - 18, 16),
                         f"{planet.parent_star.name}  ·  pop "
-                        f"{planet.population:.0f}  ·  "
-                        f"desenv. {planet.developement:.1f}  ·  "
-                        f"defesa {planet.defense:.0f}",
+                        f"{format_population(planet.population)}  ·  "
+                        f"desenv. {planet.developement:.1f}",
+                        self.f_small))
+                    y += 14
+                    self._panel_buttons.append(_FakeLabel(
+                        (x0 + 10, y, w - 18, 16),
+                        f"exp {planet.terraform_level}  ·  "
+                        f"hab {getattr(planet, 'habitats', 0)}",
                         self.f_small))
                     y += 20
             self._panel_content_height = y - viewport.top
@@ -642,7 +651,7 @@ class GameUI:
                 suit = p.get_suitability(f)
                 if p.is_colonized:
                     if p.faction is f:
-                        text = f"{p.name[-1]} MINHA tf{p.terraform_level}"
+                        text = f"{p.name[-1]} MINHA exp{p.terraform_level} hab{getattr(p, 'habitats', 0)}"
                         col = C.PLANET_MINE
                     elif p.faction:
                         text = f"{p.name[-1]} {p.faction.name[:10]}"
@@ -675,12 +684,12 @@ class GameUI:
             y = viewport.top + 8
             bw = (w - 4) // 2
             ac_label = f"Auto-colonizar: {'ON' if f.auto_colonize else 'OFF'}"
-            at_label = f"Auto-terraform: {'ON' if f.auto_terraform else 'OFF'}"
+            ah_label = f"Auto-habitat: {'ON' if f.auto_habitat else 'OFF'}"
             self._panel_buttons.append(Button(
                 (x0, y, bw, 24), ac_label, self._toggle_auto_colonize))
             self._panel_buttons.append(Button(
-                (x0 + bw + 4, y, bw, 24), at_label,
-                self._toggle_auto_terraform))
+                (x0 + bw + 4, y, bw, 24), ah_label,
+                self._toggle_auto_habitat))
             y += 30
 
             my_total = f.compute_strength()['total']
@@ -999,17 +1008,27 @@ class GameUI:
                     enabled=lambda: f.can_afford(DESIGNS['colony']['cost'])))
                 x += 220
         elif p.faction is f:
-            if p.terraform_level < p.max_terraform_level:
+            from graphics.star import HABITAT_MAX_PER_PLANET
+            if p.habitats >= HABITAT_MAX_PER_PLANET:
                 self._action_buttons.append(Button(
-                    (x, y, 150, 24), "Terraformar",
-                    lambda: self._terraform(p),
-                    enabled=lambda: f.can_terraform(p)))
-                x += 160
+                    (x, y, 170, 24), "Habitats: máx.",
+                    lambda: None, enabled=lambda: False))
+                x += 180
+            elif p.habitat_building:
+                self._action_buttons.append(Button(
+                    (x, y, 170, 24), "Habitat em construção",
+                    lambda: None, enabled=lambda: False))
+                x += 180
             else:
                 self._action_buttons.append(Button(
-                    (x, y, 150, 24), "Max. terraform",
-                    lambda: None, enabled=lambda: False))
-                x += 160
+                    (x, y, 170, 24), "Construir habitat",
+                    lambda: self._build_habitat(p),
+                    enabled=lambda: f.can_build_habitat(p)))
+                x += 180
+            ah_label = f"Auto-habitat: {'ON' if f.auto_habitat else 'OFF'}"
+            self._action_buttons.append(Button(
+                (x, y, 170, 24), ah_label, self._toggle_auto_habitat))
+            x += 180
         self._action_buttons.append(Button(
             (x, y, 150, 24), "Vista 3D  [V]",
             self._open_planet_viewer,
@@ -1061,7 +1080,7 @@ class GameUI:
         title = self.f_title.render(outcome, True, C.ACCENT)
         detail = self.f.render(
             f"{winner.name} conquistou a vitória "
-            f"{self.state.VICTORY_MODES[self.state.victory_mode]}.",
+            f"{self.state.winner_condition or self.state.VICTORY_MODES[self.state.victory_mode]}.",
             True, C.TEXT)
         self.screen.blit(title, title.get_rect(
             center=(self.W // 2, self.H // 2 - 24)))
@@ -1499,7 +1518,7 @@ class GameUI:
                 f"COLÔNIAS ({len(f.colonies)})", True, C.ACCENT),
                 (x0 + 10, y))
             self.screen.blit(self.f_small.render(
-                f"População total: {population:.0f}",
+                f"População total: {format_population(population)}",
                 True, C.DIM), (x0 + 10, y + 20))
 
         elif self.active_tab == 'build':
@@ -1564,8 +1583,14 @@ class GameUI:
 
         p = self.selected_planet
         suit = p.get_suitability(self.faction)
-        tf = (f"  tf {p.terraform_level}/{p.max_terraform_level}"
-            if p.is_colonized else "")
+        from graphics.star import format_population as _fmt_pop
+        tf = ""
+        if p.is_colonized:
+            exp = p.expansion_info()
+            tf = (f"  exp {exp['level']}/{exp['max']}"
+                  f" ({exp['percent'] * 100:.0f}%"
+                  f", {exp['years_left']:.0f} anos)"
+                  f"  hab {getattr(p, 'habitats', 0)}")
         type_label = PLANET_TYPE_LABELS.get(
             planet_type_of(p), 'Planeta')
         if getattr(p, 'has_rings', False):
@@ -1591,9 +1616,9 @@ class GameUI:
             except Exception:
                 pop_max, dev_max = 2000, 2.0
             self.screen.blit(self.f_small.render(
-                f"  Pop {p.population:.0f}/{pop_max:.0f}  "
+                f"  Pop {_fmt_pop(p.population)}/{_fmt_pop(pop_max)}  "
                 f"dev {p.developement:.2f}/{dev_max:.2f}  "
-                f"prod {p.production:.2f}",
+                f"prod {p.annual_output():.1f}/ano",
                 True, C.DIM), (10, y0 + 70))
 
             if p.max_defense > 0:
@@ -1651,8 +1676,9 @@ class GameUI:
             capacity['max_dev'], capacity['max_pop'],), 2)
         planet_type = planet_type_of(planet)
         rings = bool(getattr(planet, 'has_rings', False))
+        habitats = int(getattr(planet, 'habitats', 0))
         key = (id(planet), suitability, size, lights, self.texture_detail,
-               planet_type, rings)
+               planet_type, rings, habitats)
         if key not in self._planet_surfaces:
             star_name = (planet.parent_star.name
                          if planet.parent_star is not None else '')
@@ -1660,7 +1686,7 @@ class GameUI:
             self._planet_surfaces[key] = generate_planet_surface(
                 planet.life_suitability, seed, size, city_lights=lights,
                 detail_level=self.texture_detail, planet_type=planet_type,
-                rings=rings)
+                rings=rings, habitats=habitats)
         return self._planet_surfaces[key]
 
     def _map_planet_surface(self, planet, size):
@@ -1671,7 +1697,8 @@ class GameUI:
             capacity['max_dev'], capacity['max_pop'],), 2)
         key = (id(planet), suitability, size, lights, self.texture_detail,
                planet_type_of(planet), bool(getattr(planet, 'has_rings',
-                                                   False)))
+                                                   False)),
+               int(getattr(planet, 'habitats', 0)))
         if key not in self._map_planet_surfaces:
             render_size = min(512, max(64, 1 << (size - 1).bit_length()))
             surface = self._planet_surface(planet, render_size)

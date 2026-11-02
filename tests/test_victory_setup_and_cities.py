@@ -81,14 +81,16 @@ class NewGameSelectionTests(unittest.TestCase):
         finally:
             random.setstate(random_state)
 
-    def test_victory_selection_covers_all_six_modes(self):
+    def test_victory_selection_covers_all_nine_modes(self):
         selection = VictorySelectionScreen(pygame.Surface((900, 600)))
         selection.draw()
-        self.assertEqual(len(selection.OPTIONS), 6)
+        self.assertEqual(len(selection.OPTIONS), 9)
         self.assertEqual(
             {option[0] for option in selection.OPTIONS},
             set(GameState.VICTORY_MODES))
-        self.assertEqual(set(GALACTIC_WONDERS), set(GameState.VICTORY_MODES))
+        self.assertEqual(
+            set(GALACTIC_WONDERS),
+            set(GameState.VICTORY_MODES) - {"any"})
         self.assertEqual(
             selection.handle_event(pygame.event.Event(
                 pygame.KEYDOWN, key=pygame.K_RETURN)), "standard")
@@ -99,7 +101,7 @@ class NewGameSelectionTests(unittest.TestCase):
                 selection = VictorySelectionScreen(
                     pygame.Surface(size))
                 selection.draw()
-                self.assertEqual(len(selection.option_rects), 6)
+                self.assertEqual(len(selection.option_rects), 9)
                 self.assertTrue(all(
                     0 <= rect.left < rect.right <= size[0]
                     and 0 <= rect.top < rect.bottom <= size[1]
@@ -293,6 +295,51 @@ class VictoryAndCalendarTests(unittest.TestCase):
         self.assertFalse(self.opponent.build_wonder("domination"))
         self.assertIn("domination", self.player.wonders)
         self.assertEqual(state.wonders_built["domination"], self.player.name)
+
+    def test_terraforming_victory_requires_twelve_expansion_tiers(self):
+        state = self.make_state("terraforming")
+        self.player.home_planet.terraform_level = 11
+        state._check_victory()
+        self.assertIsNone(state.winner)
+
+        self.player.home_planet.terraform_level = 12
+        state._check_victory()
+        self.assertIs(state.winner, self.player)
+        self.assertEqual(state.winner_condition, "Ecopoese")
+
+    def test_habitat_victory_requires_twenty_four_stations(self):
+        state = self.make_state("habitat")
+        self.player.home_planet.habitats = 23
+        state._check_victory()
+        self.assertIsNone(state.winner)
+
+        self.player.home_planet.habitats = 24
+        state._check_victory()
+        self.assertIs(state.winner, self.player)
+        self.assertEqual(
+            state.winner_condition, "Habitação Orbital")
+
+    def test_combined_mode_is_won_by_the_first_condition_met(self):
+        state = self.make_state("any")
+        self.opponent.eliminated = True
+        state._check_victory()
+        self.assertIs(state.winner, self.player)
+        self.assertIn(
+            state.winner_condition, ("Diplomática", "Dominação"))
+
+    def test_combined_mode_falls_back_to_strength_in_3000(self):
+        state = self.make_state("any")
+        state.time = 850 * 12
+        self.player.home_planet.defense = 1000
+        self.opponent.home_planet.defense = 100
+        state._check_victory()
+        self.assertIs(state.winner, self.player)
+        self.assertIn("3000", state.winner_condition)
+
+    def test_ecopoese_and_habitat_wonders_exist_for_their_modes(self):
+        for mode in ("terraforming", "habitat"):
+            self.assertIn(mode, GALACTIC_WONDERS)
+            self.assertIn("cost", GALACTIC_WONDERS[mode])
 
 
 class CityGenerationTests(unittest.TestCase):

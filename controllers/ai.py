@@ -10,7 +10,7 @@ class AIController(BaseController):
         self.think_interval = think_interval
         self.timer = 0.0
         faction.auto_colonize = True
-        faction.auto_terraform = True
+        faction.auto_habitat = True
 
     def update(self, state, dt):
         if self.faction.eliminated:
@@ -23,7 +23,7 @@ class AIController(BaseController):
             self._manage_research(state)
             self._manage_wonders(state)
             self._manage_scouts(state)
-            self.faction.auto_terraform_step()
+            self.faction.auto_habitat_step()
             self.faction.auto_expand_step(state)
             self._manage_fleet(state)
             self._manage_diplomacy(state)
@@ -57,7 +57,10 @@ class AIController(BaseController):
             'economic': 'economic',
             'expansion': 'expansion',
             'scientific': 'scientific',
+            'terraforming': 'terraforming',
+            'habitat': 'habitat',
             'standard': 'standard',
+            'any': 'standard',
         }.get(state.victory_mode)
         if wonder is not None and wonder not in state.wonders_built:
             self.faction.build_wonder(wonder)

@@ -100,6 +100,12 @@ class VictorySelectionScreen:
          "Pesquise todos os campos até o nível máximo."),
         ("standard", "PADRÃO",
          "Quem tiver mais força total em 3000 vence."),
+        ("terraforming", "ECOPOESE",
+         "Some 12 níveis de expansão terraformadora entre suas colônias."),
+        ("habitat", "HABITAÇÃO ORBITAL",
+         "Construa 24 habitats orbitais em seus impérios."),
+        ("any", "TODAS AS CONDIÇÕES",
+         "Corrida livre: qualquer condição vence; 3000 desempata."),
     )
 
     def __init__(self, screen):
@@ -164,11 +170,12 @@ class VictorySelectionScreen:
         gap = 10
         card_width = (width - 40 - gap * (columns - 1)) // columns
         card_height = min(
-            116, max(44, (height - 220 - gap * (rows - 1)) // rows))
+            116, max(36, (height - 190 - gap * (rows - 1)) // rows))
         grid_width = columns * card_width + (columns - 1) * gap
         start_x = (width - grid_width) // 2
         grid_height = rows * card_height + (rows - 1) * gap
         start_y = max(height // 3 + 25, (height - grid_height) // 2 + 35)
+        start_y = max(8, min(start_y, height - grid_height - 8))
         self.option_rects = []
         for index, (_, label, details) in enumerate(self.OPTIONS):
             row, column = divmod(index, columns)

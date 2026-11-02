@@ -19,8 +19,15 @@ class GameState:
         "economic": "Econômica",
         "expansion": "Expansão",
         "scientific": "Científica",
+        "terraforming": "Ecopoese",
+        "habitat": "Habitação Orbital",
         "standard": "Padrão",
+        "any": "Todas as Condições",
     }
+    # Soma de níveis de expansão (terraformação) necessária para Ecopoese.
+    TERRAFORM_VICTORY_TIERS = 12
+    # Total de habitats orbitais necessários para Habitação Orbital.
+    HABITAT_VICTORY_COUNT = 24
 
     def __init__(self, map_G, stars, factions, tick_interval=0.5,
                  victory_mode="standard"):
@@ -38,6 +45,7 @@ class GameState:
         self.running = False
         self.game_over = False
         self.winner = None
+        self.winner_condition = None
         self.wonders_built = {}
         self.tick_interval = tick_interval
         self.lock = threading.RLock()
@@ -181,57 +189,109 @@ class GameState:
                 continue
             builder.adjust_relation(other, 0.05 * dt)
 
+    CONDITIONAL_MODES = ("diplomatic", "domination", "economic",
+                         "scientific", "terraforming", "habitat")
+
+    def _cond_diplomatic(self, active):
+        for faction in active:
+            if all(
+                    other is faction
+                    or other.name in faction.allies
+                    or other.eliminated
+                    for other in self.factions):
+                return faction
+        return None
+
+    def _cond_domination(self, active):
+        return active[0] if len(active) == 1 else None
+
+    def _cond_economic(self, active):
+        ranked = sorted(
+            active, key=lambda faction: faction.economy_score(),
+            reverse=True)
+        if ranked[0].economy_score() >= sum(
+                faction.economy_score() for faction in ranked[1:]) * 2:
+            return ranked[0]
+        return None
+
+    def _cond_scientific(self, active):
+        return next(
+            (faction for faction in active
+             if all(faction.is_tech_capped(field)
+                    for field in faction.tech_tree)),
+            None)
+
+    def _cond_terraforming(self, active):
+        return next(
+            (faction for faction in active
+             if sum(getattr(p, 'terraform_level', 0)
+                    for p in faction.colonies.values()
+                    if p.faction is faction)
+             >= self.TERRAFORM_VICTORY_TIERS),
+            None)
+
+    def _cond_habitat(self, active):
+        return next(
+            (faction for faction in active
+             if faction.habitat_total() >= self.HABITAT_VICTORY_COUNT),
+            None)
+
     def _check_victory(self):
         active = [faction for faction in self.factions
                   if not faction.eliminated]
         if not active:
             return
 
-        winner = None
-        if self.victory_mode == "diplomatic":
-            for faction in active:
-                if all(
-                        other is faction
-                        or other.name in faction.allies
-                        or other.eliminated
-                        for other in self.factions):
-                    winner = faction
-                    break
-        elif self.victory_mode == "domination" and len(active) == 1:
-            winner = active[0]
-        elif self.victory_mode == "economic":
-            ranked = sorted(
-                active, key=lambda faction: faction.economy_score(),
-                reverse=True)
-            if ranked[0].economy_score() >= sum(
-                    faction.economy_score() for faction in ranked[1:]) * 2:
-                winner = ranked[0]
-        elif self.victory_mode == "scientific":
-            winner = next(
-                (faction for faction in active
-                 if all(faction.is_tech_capped(field)
-                        for field in faction.tech_tree)),
-                None)
+        checkers = {
+            "diplomatic": self._cond_diplomatic,
+            "domination": self._cond_domination,
+            "economic": self._cond_economic,
+            "scientific": self._cond_scientific,
+            "terraforming": self._cond_terraforming,
+            "habitat": self._cond_habitat,
+        }
 
-        if winner is None and self.year >= 3000:
-            if self.victory_mode == "standard":
+        winner = None
+        condition = None
+        if self.victory_mode == "standard":
+            if self.year >= 3000:
                 winner = max(
                     active,
                     key=lambda faction: faction.compute_strength()["total"])
-            elif self.victory_mode == "expansion":
+                condition = self.VICTORY_MODES["standard"]
+        elif self.victory_mode == "expansion":
+            if self.year >= 3000:
                 winner = max(
                     active,
                     key=lambda faction: sum(
                         planet.population
                         for planet in faction.colonies.values()))
+                condition = self.VICTORY_MODES["expansion"]
+        else:
+            modes = (self.CONDITIONAL_MODES
+                     if self.victory_mode == "any"
+                     else (self.victory_mode,))
+            for mode in modes:
+                winner = checkers[mode](active)
+                if winner is not None:
+                    condition = self.VICTORY_MODES[mode]
+                    break
+            if (winner is None and self.victory_mode == "any"
+                    and self.year >= 3000):
+                winner = max(
+                    active,
+                    key=lambda faction: faction.compute_strength()["total"])
+                condition = f"{self.VICTORY_MODES['any']} (3000)"
+
         if winner is None:
             return
 
         self.winner = winner
+        self.winner_condition = condition
         self.game_over = True
         self.paused = True
         self.log_event(
-            f"{winner.name} venceu: {self.VICTORY_MODES[self.victory_mode]}")
+            f"{winner.name} venceu: {condition}")
 
     def _resolve_combat(self, dt):
         warships = []
@@ -310,6 +370,7 @@ class GameState:
         planet.population *= 0.5
         planet.developement *= 0.7
         planet.defense = planet.max_defense * 0.3
+        planet.habitat_building = False
         # Limpa fila de construção
         while True:
             try:

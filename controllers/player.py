@@ -14,8 +14,8 @@ class PlayerController(BaseController):
             return
         if self.faction.auto_colonize:
             self.faction.auto_expand_step(state)
-        if self.faction.auto_terraform:
-            self.faction.auto_terraform_step()
+        if self.faction.auto_habitat:
+            self.faction.auto_habitat_step()
 
     def select(self, star, planet=None):
         self.selected_star = star
@@ -59,19 +59,19 @@ class PlayerController(BaseController):
     def has_idle_colony_ship(self):
         return bool(self.faction.idle_colony_ships())
 
-    def terraform(self, planet):
-        return self.faction.terraform(planet)
+    def build_habitat(self, planet=None):
+        return self.faction.build_habitat(planet)
 
-    def can_terraform(self, planet):
-        return self.faction.can_terraform(planet)
+    def can_build_habitat(self, planet):
+        return self.faction.can_build_habitat(planet)
 
     def toggle_auto_colonize(self):
         self.faction.auto_colonize = not self.faction.auto_colonize
         return self.faction.auto_colonize
 
-    def toggle_auto_terraform(self):
-        self.faction.auto_terraform = not self.faction.auto_terraform
-        return self.faction.auto_terraform
+    def toggle_auto_habitat(self):
+        self.faction.auto_habitat = not self.faction.auto_habitat
+        return self.faction.auto_habitat
 
     def declare_war(self, other):
         self.faction.update_diplomacy(other, DiplomacyStatus.WAR)

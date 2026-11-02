@@ -608,17 +608,99 @@ def _sample_pixels_bilinear(
     return upper * (1.0 - blend_y) + lower * blend_y
 
 
+def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
+    t = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _light_direction() -> np.ndarray:
+    sun = np.asarray(PLANET_SUN_DIRECTION, dtype=np.float32)
+    return sun / np.linalg.norm(sun)
+
+
+def generate_habitat_light_texture(
+        seed: str, size: tuple[int, int],
+        detail_level: int = 3, style: str = 'asteroid') -> pygame.Surface:
+    """Postes de colônia que ignoram a terra: brilhos semeados no escuro.
+
+    Em asteroides os pontos se espalham por toda a superfície; em gigantes
+    gasosos eles se agrupam em faixas de latitude (cidades em flotadores).
+    """
+    width, height = size
+    if width < 32 or height < 16:
+        raise ValueError("Planet textures must be at least 32x16 pixels")
+    strength = np.zeros((height, width), dtype=np.float32)
+    generator = random.Random(
+        _stable_seed(f"{seed}:habitat-lights:{style}"))
+    count = max(8, min(64, width * height // 3000))
+    for _ in range(count):
+        center_x = generator.randrange(width)
+        if style == 'gas_giant':
+            band = generator.uniform(-0.85, 0.85)
+            center_y = int((0.5 - band / math.pi * 0.5) * height)
+            center_y = (center_y + generator.randint(-2, 2)) % height
+            sigma = generator.uniform(1.2, 2.8)
+        else:
+            center_y = generator.randrange(height)
+            sigma = generator.uniform(0.8, 1.8)
+        half = max(2, int(math.ceil(sigma * 3.0)))
+        offsets = np.arange(-half, half + 1)
+        yy = np.clip(center_y + offsets, 0, height - 1)
+        xx = (center_x + offsets) % width
+        patch = np.exp(
+            -(offsets[:, None] ** 2 + offsets[None, :] ** 2)
+            / (2.0 * sigma ** 2))
+        sub = strength[np.ix_(yy, xx)]
+        np.maximum(sub, patch * generator.uniform(150.0, 255.0), out=sub)
+        strength[np.ix_(yy, xx)] = sub
+
+    color = np.asarray((168, 226, 255), dtype=np.float32)
+    surface = pygame.Surface((width, height), pygame.SRCALPHA)
+    rgb_pixels = pygame.surfarray.pixels3d(surface)
+    rgb_pixels[:, :, :] = np.broadcast_to(
+        np.clip(color, 0, 255).astype(np.uint8), (width, height, 3))
+    del rgb_pixels
+    alpha_pixels = pygame.surfarray.pixels_alpha(surface)
+    alpha_pixels[:, :] = np.transpose(
+        np.clip(strength, 0, 255).astype(np.uint8), (1, 0))
+    del alpha_pixels
+    return surface
+
+
+def _draw_habitat_dots(surface: pygame.Surface, seed: str,
+                       center: float, orbit_radius: float,
+                       count: int, size: int):
+    """Pontos de estações orbitando o mundo (determinístico por seed)."""
+    if count <= 0 or orbit_radius <= 0:
+        return
+    generator = random.Random(_stable_seed(f"{seed}:habitat-dots"))
+    tilt = generator.uniform(0.28, 0.55)
+    phase = generator.uniform(0.0, math.tau)
+    dot = max(1, size // 72)
+    for index in range(min(count, 10)):
+        angle = phase + math.tau * index / max(1, min(count, 10))
+        x = center + orbit_radius * math.cos(angle)
+        y = center + orbit_radius * tilt * math.sin(angle)
+        pygame.draw.circle(surface, (178, 232, 255),
+                           (int(x), int(y)), dot)
+        pygame.draw.circle(surface, (60, 110, 150),
+                           (int(x), int(y)), max(1, dot + 1), 1)
+
+
 def generate_planet_surface(
         suitability: Mapping[str, float], seed: str,
         size: int = 96, city_lights: float = 0.0,
         detail_level: int = 3, planet_type: str = 'terrestrial',
-        rings: bool = False) -> pygame.Surface:
+        rings: bool = False, habitats: int = 0) -> pygame.Surface:
     """Render a repeatable, randomly textured 2D planet for a world."""
     if planet_type == 'gas_giant':
         return generate_gas_giant_surface(
-            seed, size, detail_level, rings=rings)
+            seed, size, detail_level, rings=rings,
+            city_lights=city_lights, habitats=habitats)
     if planet_type == 'asteroid':
-        return generate_asteroid_surface(seed, size, detail_level)
+        return generate_asteroid_surface(
+            seed, size, detail_level, city_lights=city_lights,
+            habitats=habitats)
     if size < 16:
         raise ValueError("Planet surfaces must be at least 16 pixels wide")
     if not isinstance(detail_level, int) or not 1 <= detail_level <= 8:
@@ -643,7 +725,8 @@ def generate_planet_surface(
     sun /= np.linalg.norm(sun)
     illumination = (
         nx * sun[0] + ny * sun[1] + nz * sun[2])
-    brightness = 0.20 + 0.80 * np.maximum(0.0, illumination)
+    daylight = _smoothstep(-0.22, 0.38, illumination)
+    brightness = 0.16 + 0.92 * daylight
     pixels = _sample_pixels_bilinear(
         texture_pixels,
         ((longitude / math.tau + 0.5) * texture.get_width()) - 0.5,
@@ -660,14 +743,27 @@ def generate_planet_surface(
         pygame.surfarray.array_alpha(cloud_texture).T.astype(np.float32),
         sample_x, sample_y,
     ) / 255.0
-    daylight = np.maximum(0.0, illumination)
-    cloud_opacity = cloud_alpha * (0.22 + 0.58 * daylight)
+    sun_face = np.maximum(0.0, illumination)
+    cloud_opacity = cloud_alpha * (0.22 + 0.58 * sun_face)
     shaded = (
         shaded * (1.0 - cloud_opacity[..., None])
         + np.asarray((205, 222, 235), dtype=np.float32)
-        * (0.32 + 0.68 * daylight[..., None])
+        * (0.32 + 0.68 * sun_face[..., None])
         * cloud_opacity[..., None]
     )
+    # Especular do oceano: highlight de Blinn nos pixels azul-escuros.
+    half_vector = sun + np.asarray((0.0, 0.0, 1.0), dtype=np.float32)
+    half_vector /= np.linalg.norm(half_vector)
+    specular = np.clip(
+        nx * half_vector[0] + ny * half_vector[1]
+        + nz * half_vector[2], 0.0, 1.0) ** 28
+    ocean_like = (
+        (pixels[..., 2] > pixels[..., 0] + 18.0)
+        & (pixels.mean(axis=-1) < 135.0)
+        & (1.0 - cloud_opacity > 0.5))
+    shaded += (
+        np.asarray((210.0, 232.0, 255.0), dtype=np.float32)
+        * (specular * ocean_like * daylight)[..., None] * 0.45)
     if city_lights > 0:
         city_texture = generate_city_light_texture(
             suitability, seed, (texture.get_width(), texture.get_height()),
@@ -680,13 +776,19 @@ def generate_planet_surface(
             sample_x, sample_y) / 255.0
         city_strength = math.pow(
             min(1.0, max(0.0, city_lights)), 0.35)
-        city_alpha *= city_strength * np.clip(
-            -illumination, 0.0, 1.0) ** 1.2
+        night = (1.0 - daylight) ** 1.3
+        city_alpha *= city_strength * night
         city_alpha *= 1.0 - cloud_opacity * 0.35
         shaded = (
             shaded * (1.0 - city_alpha[..., None])
             + city_pixels * city_alpha[..., None] * 1.15
         )
+    # Aro atmosférico (Fresnel): azul strengthened na borda, lado diurno.
+    fresnel = np.clip(1.0 - nz, 0.0, 1.0) ** 2.6 * mask
+    rim = fresnel * (0.15 + 0.85 * daylight)
+    shaded += (
+        np.asarray((120.0, 170.0, 255.0), dtype=np.float32)
+        * rim[..., None] * 0.5)
     shaded = np.clip(shaded, 0, 255).astype(np.uint8)
     pixels3d = pygame.surfarray.pixels3d(sphere)
     pixels3d[:, :, :] = np.transpose(shaded, (1, 0, 2))
@@ -704,6 +806,10 @@ def generate_planet_surface(
         3.8, 5.7, max(1, size // 32),
     )
     pygame.draw.circle(sphere, (196, 227, 255), (center, center), radius, 1)
+    if habitats:
+        _draw_habitat_dots(
+            sphere, seed, center,
+            min(radius * 1.26, size * 0.47 - 2), int(habitats), size)
     return sphere
 
 
@@ -918,7 +1024,11 @@ def asteroid_radius_factor(seed: str,
 
 def _shaded_sphere_from_texture(
         texture: pygame.Surface, size: int, radius: np.ndarray | float,
-        center: float, ambient: float) -> pygame.Surface:
+        center: float, ambient: float,
+        lights: pygame.Surface | None = None,
+        lights_strength: float = 0.0,
+        rim_color: tuple[int, int, int] | None = None,
+        ) -> pygame.Surface:
     """Project an equirectangular texture onto a (possibly lumpy) disc."""
     texture_pixels = _surface_array(texture)
     sphere = pygame.Surface((size, size), pygame.SRCALPHA)
@@ -932,14 +1042,37 @@ def _shaded_sphere_from_texture(
     nz = np.sqrt(np.maximum(0.0, nz_squared))
     longitude = np.arctan2(nx, nz)
     latitude = np.arcsin(np.clip(ny, -1.0, 1.0))
-    sun = np.asarray(PLANET_SUN_DIRECTION, dtype=np.float32)
-    sun /= np.linalg.norm(sun)
+    sun = _light_direction()
     illumination = nx * sun[0] + ny * sun[1] + nz * sun[2]
-    brightness = ambient + (1.0 - ambient) * np.maximum(0.0, illumination)
+    daylight = _smoothstep(-0.22, 0.38, illumination)
+    brightness = ambient + (1.0 - ambient) * daylight
     sample_x = (longitude / math.tau + 0.5) * texture.get_width() - 0.5
     sample_y = (0.5 - latitude / math.pi) * texture.get_height() - 0.5
     shaded = _sample_pixels_bilinear(
         texture_pixels, sample_x, sample_y) * brightness[..., None]
+
+    if rim_color is not None:
+        fresnel = np.clip(1.0 - nz, 0.0, 1.0) ** 2.6 * mask
+        rim = fresnel * (0.15 + 0.85 * daylight)
+        shaded += (
+            np.asarray(rim_color, dtype=np.float32)
+            * rim[..., None] * 0.5)
+
+    if lights is not None and lights_strength > 0:
+        light_pixels = _surface_array(lights)
+        light_alpha = _sample_pixels_bilinear(
+            pygame.surfarray.array_alpha(lights).T.astype(np.float32),
+            sample_x, sample_y) / 255.0
+        night = (1.0 - daylight) ** 1.2
+        light_alpha = light_alpha * lights_strength * (
+            0.35 + 0.65 * night)
+        sampled = _sample_pixels_bilinear(
+            light_pixels, sample_x, sample_y)
+        shaded = (
+            shaded * (1.0 - light_alpha[..., None])
+            + sampled * light_alpha[..., None] * 1.25
+        )
+
     shaded = np.clip(shaded, 0, 255).astype(np.uint8)
 
     pixels3d = pygame.surfarray.pixels3d(sphere)
@@ -954,7 +1087,8 @@ def _shaded_sphere_from_texture(
 
 def generate_gas_giant_surface(
         seed: str, size: int = 96, detail_level: int = 3,
-        rings: bool = False) -> pygame.Surface:
+        rings: bool = False, city_lights: float = 0.0,
+        habitats: int = 0) -> pygame.Surface:
     """Render a banded gas giant, optionally with a ring system."""
     if size < 16:
         raise ValueError("Planet surfaces must be at least 16 pixels wide")
@@ -962,7 +1096,15 @@ def generate_gas_giant_surface(
         seed, (size * 2, size), detail_level=detail_level)
     center = size // 2
     radius = int(size * 0.43)
-    body = _shaded_sphere_from_texture(texture, size, radius, center, 0.15)
+    lights = None
+    if city_lights > 0:
+        lights = generate_habitat_light_texture(
+            seed, (texture.get_width(), texture.get_height()),
+            detail_level, style='gas_giant')
+    body = _shaded_sphere_from_texture(
+        texture, size, radius, center, 0.15, lights=lights,
+        lights_strength=math.pow(min(1.0, max(0.0, city_lights)), 0.4),
+        rim_color=(150, 180, 225))
 
     _, _, highlight = gas_giant_palette(seed)
     pygame.draw.arc(
@@ -973,6 +1115,10 @@ def generate_gas_giant_surface(
     )
 
     if not rings:
+        if habitats:
+            _draw_habitat_dots(
+                body, seed, center,
+                min(radius * 1.2, size * 0.47 - 2), int(habitats), size)
         return body
 
     light_band, dark_band, _ = gas_giant_palette(seed)
@@ -994,11 +1140,16 @@ def generate_gas_giant_surface(
     composed.blit(back, (0, 0))
     composed.blit(body, (0, 0))
     composed.blit(front, (0, 0))
+    if habitats:
+        _draw_habitat_dots(
+            composed, seed, center,
+            min(radius * 1.2, size * 0.47 - 2), int(habitats), size)
     return composed
 
 
 def generate_asteroid_surface(
-        seed: str, size: int = 64, detail_level: int = 3) -> pygame.Surface:
+        seed: str, size: int = 64, detail_level: int = 3,
+        city_lights: float = 0.0, habitats: int = 0) -> pygame.Surface:
     """Render a cratered, irregularly shaped asteroid body."""
     if size < 16:
         raise ValueError("Planet surfaces must be at least 16 pixels wide")
@@ -1012,4 +1163,17 @@ def generate_asteroid_surface(
     theta = np.arctan2(y_grid - center, x_grid - center)
     radius = base_radius * asteroid_radius_factor(seed, theta)
     radius = np.maximum(radius, 1.0)
-    return _shaded_sphere_from_texture(texture, size, radius, center, 0.06)
+    lights = None
+    if city_lights > 0:
+        lights = generate_habitat_light_texture(
+            seed, (texture.get_width(), texture.get_height()),
+            detail_level, style='asteroid')
+    body = _shaded_sphere_from_texture(
+        texture, size, radius, center, 0.06, lights=lights,
+        lights_strength=math.pow(min(1.0, max(0.0, city_lights)), 0.4),
+        rim_color=(120, 140, 170) if habitats or city_lights else None)
+    if habitats:
+        _draw_habitat_dots(
+            body, seed, center,
+            min(base_radius * 1.45, size * 0.47 - 2), int(habitats), size)
+    return body
