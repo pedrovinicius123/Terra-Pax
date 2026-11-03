@@ -33,6 +33,9 @@ class PlayerController(BaseController):
     def propose_alliance(self, other):
         return self.faction.propose_alliance(other)
 
+    def propose_trade_offer(self, other):
+        return self.faction.propose_trade_offer(other)
+
     def break_alliance(self, other):
         return self.faction.break_alliance(other)
 
@@ -84,3 +87,6 @@ class PlayerController(BaseController):
 
     def respond_to_peace_offer(self, other, accept):
         return self.faction.respond_to_peace_offer(other, accept)
+
+    def respond_to_trade_offer(self, other, accept):
+        return self.faction.respond_to_trade_offer(other, accept)

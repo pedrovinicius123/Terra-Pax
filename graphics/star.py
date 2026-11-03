@@ -629,7 +629,7 @@ class Planet:
         O custo é pago aqui, não no enfileiramento: uma obra pedida a uma
         colônia pobre entra na fila e espera a carga chegar de outra colônia.
         """
-        if self.faction is None or not self.build_queue or self.queue_is_full():
+        if self.faction is None or self.queue_is_full():
             return
         for task in list(self.build_queue):
             if task.get('cancelled'):
@@ -641,7 +641,6 @@ class Planet:
                 continue
             task.pop('awaiting', None)
             self._start_task(task)
-            return
 
     def _start_task(self, task):
         try:

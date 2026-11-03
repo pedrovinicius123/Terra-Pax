@@ -9,3 +9,6 @@ tests
 _fps_probe.*
 _tick_probe.*
 _zoom_probe.*_economy_probe.*
+_star_probe.*
+_economy_probe.*
+task.md

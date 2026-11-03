@@ -92,6 +92,7 @@ class FactionType(Enum):
 class DiplomacyStatus(Enum):
     WAR = "War"
     CONFLICT = "Conflict"
+    TRADE = "Trade"
     NEUTRAL = "Neutral"
     PEACE = "Peace"
     ALLY = "Ally"
@@ -256,10 +257,12 @@ class Faction:
         self.diplomacy = {}
         self.relations = {}
         self.treaties = {}
+        
         self.war_declarations = set()
         self.allies = set()
         self.wonders = set()
         self.pending_peace_offers = set()
+        self.pending_trade_offers = set()
         self.declined_peace_offers = set()
 
         self.controlled_stars = {home_star.name: home_star}
@@ -416,18 +419,15 @@ class Faction:
     def pick_shipyard(self, needed:dict):
         resource_score = []
         for col in self.colonies.values():
-            if not col.queue_is_full():
-                resources_available = 0
-
-                for k, v in needed['cost'].items():
-                    resources_available += col.planet_resources.get(k, 0) / v
-
-                resource_score.append((resources_available, len(col.build_queue), col))
-
-        if not resource_score:
-            return False
-            
-        return min(resource_score, key=lambda x:x[:2])[2]
+            resources_available = 0
+            for k, v in needed['cost'].items():
+                resources_available += col.planet_resources.get(k, 0) / v
+            resource_score.append((len(col.build_queue), resources_available, col))            
+        
+        for r in sorted(resource_score, key=lambda x:x[:2]):
+            if r[2].queue_is_full():
+                continue
+            return r[2]
 
     def spawn_ship(self, design_key, at_star=None):
         design = DESIGNS[design_key]
@@ -808,6 +808,10 @@ class Faction:
             and self.diplomacy.get(
                 other.name, DiplomacyStatus.NEUTRAL) != DiplomacyStatus.WAR
         )
+    
+    def _cancel_treaty(self, other, treaty):
+        self.treaties.setdefault(other.name, set()).remove(treaty)
+        other.treaties.setdefault(self.name, set().remove(treaty))
 
     def improve_relations(self, other):
         cost = {'Energy': 25}
@@ -817,15 +821,18 @@ class Faction:
             return False
         self.adjust_relation(other, 10)
         return True
-
+    ## NOTE!!! THIS METHOD WILL BE OBSOLETE SOON!
     def offer_treaty(self, other, treaty):
         thresholds = {'non_aggression': 45, 'trade': 55}
         if treaty not in thresholds or not self._can_negotiate(other):
             return False
         if self.has_treaty(other, treaty):
+            if self.logistics_manager.overload_status().get("overloaded", False):
+                self._cancel_treaty(other, treaty)
             return True
         if self.get_relation(other) < thresholds[treaty]:
             return False
+
         self.treaties.setdefault(other.name, set()).add(treaty)
         other.treaties.setdefault(self.name, set()).add(treaty)
         return True
@@ -836,6 +843,14 @@ class Faction:
                 or self.name in other.declined_peace_offers):
             return False
         other.pending_peace_offers.add(self.name)
+        return True
+
+    def propose_trade_offer(self, other):
+        if (other is self or self.eliminated or other.eliminated
+                or self.diplomacy.get(other.name) != DiplomacyStatus.WAR
+                or self.name in other.declined_peace_offers):
+            return False
+        other.pending_trade_offers.add(self.name)
         return True
 
     def respond_to_peace_offer(self, other, accept):
@@ -850,10 +865,29 @@ class Faction:
             self.declined_peace_offers.add(other.name)
         return True
 
+    def respond_to_trade_offer(self, other, accept):
+        if other.name not in self.pending_trade_offers or self.diplomacy[other.name] == DiplomacyStatus.WAR:
+            return False
+        if accept and self.is_human:
+            if self.diplomacy.get(other.name) == DiplomacyStatus.TRADE:
+                return False
+
+            self.treaties.setdefault(other.name, set()).add('trade')
+            other.treaties.setdefault(self.name, set()).add('trade')
+
+        elif not self.is_human and self.logistics_manager.overload_status().get('overloaded', False):
+            print("Recusado!")
+            return False
+
+        self.treaties.setdefault(other.name, set()).add('trade')
+        other.treaties.setdefault(self.name, set()).add('trade')
+        return True
+
     def update_diplomacy(self, other, new_status):
         old_status = self.diplomacy.get(other.name, DiplomacyStatus.NEUTRAL)
         self.diplomacy[other.name] = new_status
         other.diplomacy[self.name] = new_status
+
         if new_status == DiplomacyStatus.WAR:
             self.pending_peace_offers.discard(other.name)
             other.pending_peace_offers.discard(self.name)

@@ -1095,6 +1095,12 @@ class GameUI:
             self.log_msg(f"Proposta de paz {decision}: {other.name}")
         self._rebuild_panel_buttons()
 
+    def _respond_to_trade_offer(self, other, accept):
+        if self.player.respond_to_trade_offer(other, accept) is not None:
+            decision = "aceita" if accept else "recusada"
+            self.log_msg(f"Proposta de comércio {decision}: {other.name}")
+        self._rebuild_panel_buttons()
+
     def _propose_alliance(self, other):
         if self.player.propose_alliance(other):
             self.log_msg(f"Aliança: {other.name}")
@@ -1132,6 +1138,14 @@ class GameUI:
             self.log_msg(
                 f"{label} recusado: relação mínima {threshold}")
         self._rebuild_panel_buttons()
+
+    def _offer_trade(self, other, label):
+        if self.player.propose_trade_offer(other):
+            self.log_msg(f"{label} firmado com {other.name}")
+        else:
+            self.log_msg(
+                f"{label} recusado")
+
 
     # ---------- Painel ----------
     def _planet_action(self, p):
@@ -1480,6 +1494,21 @@ class GameUI:
                     self._panel_buttons.append(Button(
                         (x0, y, 140, 20), "Romper aliança",
                         lambda o=other: self._break_alliance(o)))
+                
+                if other.name in f.pending_trade_offers:
+                    self._panel_buttons.append(_FakeLabel(
+                        (x0, y, w, 16),
+                        f"{other.name[:18]} propõe abrir comércio",
+                        self.f_small, color=C.ACCENT))
+                    y += 18
+                    self._panel_buttons.append(Button(
+                        (x0, y, 82, 20), "Aceitar",
+                        lambda o=other: self._respond_to_trade_offer(
+                            o, True)))
+                    self._panel_buttons.append(Button(
+                        (x0 + 88, y, 82, 20), "Recusar",
+                        lambda o=other: self._respond_to_trade_offer(
+                            o, False)))
                 else:
                     action_x = x0
                     actions = (
@@ -1498,11 +1527,11 @@ class GameUI:
                              and f.get_relation(o) >= 45)),
                         (92, ("Comércio OK" if
                               f.has_treaty(other, 'trade') else "Comércio"),
-                         lambda o=other: self._offer_treaty(
-                             o, 'trade', 'Acordo comercial'),
+                         lambda o=other: self._offer_trade(
+                             o, 'Acordo comercial'),
                          lambda o=other: (
                              not f.has_treaty(o, 'trade')
-                             and f.get_relation(o) >= 55)),
+                             and f.get_relation(o) >= 55 and not f.logistics_manager.overload_status().get('overloaded', False))),
                         (62, "Guerra",
                          lambda o=other: self._declare_war(o), None),
                     )

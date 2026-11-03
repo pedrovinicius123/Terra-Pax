@@ -121,20 +121,17 @@ class AIController(BaseController):
                 continue
 
             # Buscar apoio diplomático contra adversários mais fortes.
-            if at_war and their_power > my_power * 1.1:
-                if f.propose_alliance(other):
-                    continue
+            if at_war and their_power > my_power * 1.1 and f.propose_alliance(other):
+                continue
 
             alliance_threshold = (
                 85 if state.victory_mode == 'diplomatic' else 70)
-            if (self.aggression < 0.7
-                    or state.victory_mode == 'diplomatic'):
-                if relation < alliance_threshold:
-                    relation = f.adjust_relation(other, 1)
+            if (self.aggression < 0.7 or state.victory_mode == 'diplomatic') and relation < alliance_threshold:
+                relation = f.adjust_relation(other, 1)
             if relation >= 45:
                 f.offer_treaty(other, 'non_aggression')
             if relation >= 55:
-                f.offer_treaty(other, 'trade')
+                f.propose_trade_offer(other)
             if (relation >= alliance_threshold
                     and f.has_treaty(other, 'trade')):
                 f.propose_alliance(other)
