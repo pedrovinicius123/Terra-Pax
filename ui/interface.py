@@ -19,6 +19,7 @@ from graphics.planet_generator import (
     generate_planet_surface,
 )
 from graphics.ship_sprites import get_ship_sprite
+from graphics.star_sprites import draw_star
 from graphics.star import (
     COLONY_FOCUSES,
     FOCUS_LABELS,
@@ -44,7 +45,6 @@ class C:
     BG          = (7, 12, 25)
     GRID        = (22, 36, 57)
     STAR        = (255, 207, 117)
-    STAR_BORDER = (255, 239, 190)
     PLANET_FREE_GOOD = (82, 220, 177)
     PLANET_FREE_MID  = (236, 190, 103)
     PLANET_FREE_LOW  = (226, 112, 121)
@@ -412,11 +412,30 @@ class GameUI:
             self.log_msg(f"Foco de pesquisa: {tech}")
             self._rebuild_panel_buttons()
 
+    def _selected_shipyard(self):
+        """Colônia selecionada, se ela puder receber a obra de uma nave."""
+        planet = self.selected_planet
+        if (planet is None or planet.faction is not self.player
+                or not planet.can_build_ships or planet.queue_is_full()):
+            return None
+        return planet
+
     def _build(self, design_key):
-        if self.player.build_ship(design_key):
-            self.log_msg(f"Fila: {DESIGNS[design_key]['display']}")
-        else:
-            self.log_msg("Recursos insuficientes")
+        yard = self._selected_shipyard() or self.player.build_ship(design_key)
+        if not yard:
+            self.log_msg("Nenhum estaleiro com vaga na fila de obras")
+            return
+        design = DESIGNS[design_key]
+        waiting = (
+            '' if self.faction.can_fund(design['cost'])
+            else ' (aguarda carga)')
+        self.log_msg(f"{yard.name}: fila de {design['display']}{waiting}")
+
+    def _shipyard_has_room(self, faction):
+        """Há colônia com vaga na fila de obras? Escassez não barra a obra."""
+        return any(not planet.queue_is_full()
+                   for planet in faction.colonies.values()
+                   if planet.can_build_ships)
 
     def _select_ship(self, ship, center=True):
         self._set_ship_selection([ship])
@@ -715,6 +734,20 @@ class GameUI:
                 self.f_small, color=C.RES[name]))
         y += 14 * ((len(shown) + 1) // 2) + 8
 
+        consumption = planet.consumption()
+        top = sorted(consumption.items(), key=lambda item: -item[1])[:3]
+        strain = getattr(planet, 'supply_strain', 0.0)
+        summary = '  '.join(
+            f"{name[:4]} {self._compact(amount)}/ano"
+            for name, amount in top)
+        self._panel_buttons.append(_FakeLabel(
+            (x0 + 4, y, w, 16),
+            f"requisitos: {summary}"
+            + (f"  · falta {strain * 100:.0f}%" if strain > 0.01 else ''),
+            self.f_small,
+            color=C.PLANET_ENEMY if strain > 0.01 else C.ACCENT))
+        y += 20
+
         self._panel_buttons.append(_FakeLabel(
             (x0, y, w, 16), f"FOCO  ·  {self._focus_label(planet)}",
             self.f_small, color=C.ACCENT))
@@ -745,9 +778,13 @@ class GameUI:
 
         active = planet.building_progress()
         queue = planet.queued_tasks()
+        manager = getattr(f, 'logistics_manager', None)
+        trips = (manager.trips_serving(planet)
+                 if manager is not None else [])
         self._panel_buttons.append(_FakeLabel(
             (x0, y, w, 16),
-            f"OBRAS  ·  {len(queue)} na fila", self.f_small, color=C.ACCENT))
+            f"OBRAS  ·  {len(queue)} na fila  ·  {len(trips)} transporte(s)",
+            self.f_small, color=C.ACCENT))
         y += 18
         if active:
             self._panel_buttons.append(_FakeBar(
@@ -765,7 +802,29 @@ class GameUI:
                 (x0 + w - 26, y - 4, 22, 20), "x",
                 lambda selected=planet, item=task: self._cancel_colony_task(
                     selected, item)))
-            y += 22
+            y += 14
+            missing = planet.task_shortfall(task)
+            if missing:
+                waiting = '  '.join(
+                    f"{name[:4]} {self._compact(amount)}"
+                    for name, amount in list(missing.items())[:3])
+                self._panel_buttons.append(_FakeLabel(
+                    (x0 + 10, y, w - 14, 14),
+                    f"aguarda carga: {waiting}", self.f_small,
+                    color=C.PLANET_ENEMY))
+                y += 14
+            else:
+                y += 8
+        if manager is not None:
+            overload = manager.overload_status()
+            if overload.get('overloaded'):
+                self._panel_buttons.append(_FakeLabel(
+                    (x0 + 4, y, w, 16),
+                    f"transportes sobrecarregados: faltam "
+                    f"{overload['missing_transports']} nave(s) para "
+                    f"{len(overload['starved'])} colônia(s)",
+                    self.f_small, color=C.PLANET_ENEMY))
+                y += 18
         habitat_button = Button(
             (x0 + 4, y, w - 8, 24),
             ("Habitat orbital — máximo atingido"
@@ -828,11 +887,28 @@ class GameUI:
                     "desenvolvimento no teto — só a expansão de nível abre "
                     "espaço", planet, None, None)
 
+            awaiting = planet.awaiting_resources()
+            if awaiting:
+                missing = ', '.join(
+                    f"{name} {self._compact(amount)}"
+                    for name, amount in list(awaiting['missing'].items())[:2])
+                add(0, 'awaiting_cargo',
+                    f"obra {awaiting['label'][:16]} parada por falta de "
+                    f"{missing} — despache transportes",
+                    planet, 'transports', 'frotas')
+
+            strain = getattr(planet, 'supply_strain', 0.0)
+            if strain > 0.2:
+                add(0, 'supply_strain',
+                    f"insumos da produção faltando em {strain * 100:.0f}% "
+                    f"— indústria rende menos", planet, 'transports', 'frotas')
+
         handlers = {
             'focus_industry': lambda planet: self._set_colony_focus(
                 planet, 'industry'),
             'habitat': lambda planet: self._build_habitat(planet),
             'select': lambda planet: self._select_colony(planet),
+            'transports': lambda planet: self._select_transports(),
         }
         recommendations = []
         for (severity, kind), entry in groups.items():
@@ -852,8 +928,33 @@ class GameUI:
                 if handler is not None else None,
                 entry['label']))
 
+        manager = getattr(f, 'logistics_manager', None)
+        if manager is not None:
+            overload = manager.overload_status()
+            if overload.get('overloaded'):
+                recommendations.append((
+                    -1,
+                    f"Transportes sobrecarregados: {len(overload['starved'])} "
+                    f"colônia(s) aguardando carga com "
+                    f"{overload['transports']} transporte(s) — faltam "
+                    f"{overload['missing_transports']}",
+                    self._select_transports, 'frotas'))
+
         recommendations.sort(key=lambda item: (item[0], item[1]))
         return recommendations[:8]
+
+    def _select_transports(self):
+        """Seleciona a logística para o jogador ver o que a frota está fazendo."""
+        transports = [ship for ship in self._own_ships()
+                      if isinstance(ship, Transport)]
+        if not transports:
+            self.log_msg("Nenhum transporte em serviço")
+            return
+        queued = sum(len(ship.mission_queue) for ship in transports)
+        self.log_msg(
+            f"Frota civil: {len(transports)} nave(s), {queued} tarefa(s) "
+            f"na fila")
+        self._select_ship(transports[0])
 
     def _apply_all_recommendations(self):
         actions = [action for _, _, action, _ in self._planner_actions
@@ -1039,10 +1140,10 @@ class GameUI:
             if self.player.has_idle_colony_ship():
                 return ("Enviar",
                         lambda pp=p: self._send_colonizer_to(pp), None)
-            if f.can_afford(DESIGNS['colony']['cost']):
+            if self._shipyard_has_room(f):
                 return ("Construir",
                         lambda: self._build('colony'),
-                        lambda: f.can_afford(DESIGNS['colony']['cost']))
+                        lambda: self._shipyard_has_room(f))
             return ("—", lambda: None, lambda: False)
         if p.faction is f:
             from graphics.star import HABITAT_MAX_PER_PLANET
@@ -1089,11 +1190,13 @@ class GameUI:
                 btn = Button((x0, y, w, 22),
                              f"{d['display']}  [{d['build_time']} meses]",
                              lambda k=key: self._build(k),
-                             enabled=lambda dd=d: f.can_afford(dd['cost']))
+                             enabled=lambda: self._shipyard_has_room(f))
                 self._panel_buttons.append(btn)
                 y += 24
                 cost_txt = "  ".join(
                     f"{k}:{int(v)}" for k, v in d['cost'].items())
+                if not f.can_fund(d['cost']):
+                    cost_txt += "   · aguarda carga"
                 self._panel_buttons.append(_FakeLabel(
                     (x0 + 4, y, w, 12), cost_txt, self.f_small))
                 y += 14
@@ -1165,7 +1268,19 @@ class GameUI:
                         f"{ship.activity}  ·  casco {ship.hull:.0f}/"
                         f"{ship.max_hull:.0f}",
                         self.f_small))
-                    y += 20
+                    y += 18
+                    if isinstance(ship, Transport):
+                        heading = (
+                            f" → {ship.destination.name}"
+                            if ship.destination is not None else "")
+                        waiting = len(ship.mission_queue)
+                        self._panel_buttons.append(_FakeLabel(
+                            (x0 + 10, y, w - 18, 16),
+                            f"porão: {ship.cargo_summary()}{heading}"
+                            f"  ·  fila {waiting}",
+                            self.f_small, color=C.PLANET_FREE_GOOD))
+                        y += 16
+                    y += 4
             others = [ship for ship in ships if id(ship) not in grouped]
             if others:
                 self._panel_buttons.append(_FakeLabel(
@@ -1663,7 +1778,7 @@ class GameUI:
                 self._action_buttons.append(Button(
                     (x, y, 210, 24), "Construir colonizadora",
                     lambda: self._build('colony'),
-                    enabled=lambda: f.can_afford(DESIGNS['colony']['cost'])))
+                    enabled=lambda: self._shipyard_has_room(f)))
                 x += 220
         elif p.faction is f:
             from graphics.star import HABITAT_MAX_PER_PLANET
@@ -1817,7 +1932,7 @@ class GameUI:
         if getattr(self, '_influence_cache_key', None) == cache_key:
             self.screen.blit(self._influence_surface, (0, 0))
             return
-        radius_world = 160
+        radius_world = 1096
         radius_px = radius_world * self.zoom
         if radius_px < 3:
             empty = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
@@ -1907,7 +2022,10 @@ class GameUI:
         for s in self.state.stars:
             sx, sy = self.world_to_screen(*s.position)
             r = max(2, int(s.radius * self.zoom))
-            if sx < -r or sx > self.W + r or sy < -r or sy > self.H + r:
+            glow = min(r + 48, int(r * 3.2))
+            if sx < -glow or sx > self.W + glow:
+                continue
+            if sy < -glow or sy > self.H + glow:
                 continue
             if s is self.selected_star:
                 for planet in s.planets:
@@ -1915,8 +2033,7 @@ class GameUI:
                     if orbit_radius > r + 2:
                         pygame.draw.circle(
                             self.screen, C.GRID, (sx, sy), orbit_radius, 1)
-            pygame.draw.circle(self.screen, C.STAR, (sx, sy), r)
-            pygame.draw.circle(self.screen, C.STAR_BORDER, (sx, sy), r, 1)
+            draw_star(self.screen, s, (sx, sy), r)
             if s is self.selected_star:
                 pygame.draw.circle(self.screen, C.SELECTED,
                                    (sx, sy), r + 4, 2)

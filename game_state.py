@@ -1,7 +1,6 @@
 import threading
 import time
 import math
-from queue import Empty
 
 from players.factions import DiplomacyStatus
 from players.ships import Warship
@@ -411,11 +410,7 @@ class GameState:
         planet.defense = planet.max_defense * 0.3
         planet.habitat_building = False
         # Limpa fila de construção
-        while True:
-            try:
-                planet.const_queue.get_nowait()
-            except Empty:
-                break
+        planet.clear_build_queue()
         # Remove do defensor, adiciona ao atacante
         defender.colonies.pop(planet.name, None)
         attacker.colonies[planet.name] = planet

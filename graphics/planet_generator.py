@@ -70,14 +70,16 @@ def greening_from_suitability(suitability) -> float:
 
 
 def generate_suitability_profile(
+        dist_start_green_zone: float,
         rng: random.Random | None = None) -> dict[str, float]:
     """Create a world profile with one randomly dominant suitability."""
     generator = random if rng is None else rng
     dominant = generator.choice(tuple(SUITABILITY_STYLES))
-    peak = generator.uniform(0.75, 1.0)
+    peak = max(0.0, 1.0 - generator.uniform(0.05, 0.15)*dist_start_green_zone)
+    less = max(0.0, 1.0 - generator.uniform(0.04, 0.12)*dist_start_green_zone)
     return {
         category: peak if category == dominant
-        else generator.uniform(0.1, peak - 0.05)
+        else less
         for category in SUITABILITY_STYLES
     }
 
@@ -782,6 +784,25 @@ def _draw_habitat_dots(surface: pygame.Surface, seed: str,
                            (int(x), int(y)), dot)
         pygame.draw.circle(surface, (60, 110, 150),
                            (int(x), int(y)), max(1, dot + 1), 1)
+
+
+def _sphere_texture_size(size: int, detail_level: int,
+                         limit: tuple[int, int] = FIELD_CAP
+                         ) -> tuple[int, int]:
+    """Textura equiretangular que um disco de `size` pixels realmente usa.
+
+    Os geradores de textura ampliam o pedido por `pixel_scale` (0.5 +
+    detail/2), mas um disco só amostra metade da largura e a altura totais da
+    textura: acima disso é supervaramostra que ninguém vê, e o campo de ruído
+    terrestre nem passa de FIELD_CAP. Limitar o pedido ao nativo do disco é o
+    que encarecia o zoom nos mundos grandes.
+    """
+    scale = 0.5 + detail_level * 0.5
+    wanted_width, wanted_height = size * 2, size
+    allowed_width = min(wanted_width, limit[0])
+    allowed_height = min(wanted_height, limit[1])
+    return (max(32, min(wanted_width, int(allowed_width / scale))),
+            max(16, min(wanted_height, int(allowed_height / scale))))
 
 
 def generate_planet_surface(

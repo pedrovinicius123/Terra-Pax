@@ -482,12 +482,141 @@ class TransportUtilityTests(unittest.TestCase):
         destination = self.faction.colonies["Colony"]
         source.planet_resources["Food"] = 1500
 
-        route = self.transport._plan_resource_transfer()
+        runs = self.faction.logistics_manager.plan_freight_runs(
+            self.transport.cargo, count=1, origin=self.source_star)
 
-        self.assertIsNotNone(route)
-        self.assertEqual(route[0], "Food")
-        self.assertIs(route[1], source)
-        self.assertIs(route[2], destination)
+        self.assertTrue(runs)
+        run = runs[0]
+        self.assertIs(run['source'], source)
+        self.assertIs(run['destination'], destination)
+        self.assertIn('Food', [resource for resource, _ in run['legs']])
+
+    def test_transporter_loads_several_resources_in_one_run(self):
+        source = self.faction.home_planet
+        destination = self.faction.colonies["Colony"]
+        source.planet_resources.update(
+            {'Food': 4000.0, 'Energy': 9000.0, 'Alloys': 800.0})
+        destination.planet_resources.update(
+            {'Food': 450.0, 'Energy': 950.0, 'Alloys': 90.0})
+        destination.queue_task({
+            'kind': 'ship', 'label': 'Corveta', 'build_time': 4.0,
+            'cost': {'Food': 120.0, 'Energy': 90.0, 'Alloys': 60.0}})
+
+        missions = self.transport.plan_missions()
+        freight = [m for m in missions if m['kind'] == 'freight']
+        self.assertTrue(freight)
+        mission = freight[0]
+        self.assertIs(mission['source'], source)
+        self.assertIs(mission['destination'], destination)
+        legs = dict(mission['legs'])
+        self.assertTrue({'Food', 'Energy'} <= set(legs))
+        self.assertLessEqual(sum(legs.values()), self.transport.cargo)
+
+        loaded = self.faction.logistics_manager.load_cargo(
+            self.transport, source, mission['legs'])
+        self.assertAlmostEqual(
+            loaded, sum(leg_amount for _, leg_amount in mission['legs']),
+            places=6)
+        self.assertEqual(set(self.transport.cargo_hold), set(legs))
+        self.assertAlmostEqual(self.transport.load, loaded)
+
+        self.faction.logistics_manager.deliver_cargo(
+            self.transport, destination)
+        self.assertEqual(self.transport.cargo_hold, {})
+        self.assertGreater(
+            destination.planet_resources['Energy'], 950.0)
+
+    def test_transporter_keeps_a_queue_of_next_tasks(self):
+        source = self.faction.home_planet
+        source.planet_resources.update({'Food': 4000.0, 'Minerals': 8000.0})
+        missions = self.transport.plan_missions()
+        self.assertTrue(missions)
+        self.transport.mission = missions[0]
+        self.transport.mission_queue = missions[1:]
+        self.assertEqual(self.transport.scheduled_missions(), missions)
+
+    def test_overload_is_reported_when_the_fleet_cannot_carry(self):
+        destination = self.faction.colonies["Colony"]
+        destination.queue_task({
+            'kind': 'ship', 'label': 'Colonizadora', 'build_time': 6.0,
+            'cost': {'Minerals': 5_000.0}})
+        status = self.faction.logistics_manager.overload_status()
+        self.assertTrue(status['overloaded'])
+        self.assertGreaterEqual(status['missing_transports'], 1)
+        self.assertIn(destination, status['starved'])
+
+
+class ShipyardDistributionTests(unittest.TestCase):
+    """Construção de naves repartida entre as colônias armadas."""
+
+    def setUp(self):
+        self.graph = nx.Graph()
+        self.faction = None
+        self.colonies = []
+        names = ('Capital', 'Forja', 'Porto', 'Estaleiro')
+        for index, name in enumerate(names):
+            star = Star(name, 1000, 10, 10, (index * 120.0, 0.0), [])
+            planet = Planet(
+                n_planet_resources=0, planet_resources={},
+                abs_position=star.position,
+                life_suitability={"Human": 1.0},
+                production=1.0, developement=0.6,
+                distance_from_star=1.0, radius=1.0,
+                is_colonized=False, name=name,
+                star_position=star.position)
+            planet.post_init()
+            planet.parent_star = star
+            star.planets.append(planet)
+            self.graph.add_node(star.name)
+            if index:
+                self.graph.add_edge(names[index - 1], star.name, weight=120.0)
+            if self.faction is None:
+                self.faction = Faction(
+                    'Smiths', FactionType.HUMAN, planet, star)
+            else:
+                self.faction.establish_colony(star, planet)
+            planet.production = 1.0
+            planet.developement = 0.6
+            planet.can_build_ships = True
+            self.colonies.append(planet)
+        self.faction.map_G = self.graph
+        self.faction.all_stars = [p.parent_star for p in self.colonies]
+        GameState(self.graph, self.faction.all_stars, [self.faction])
+
+    def queue_works(self, planet, count):
+        for _ in range(count):
+            planet.queue_task({'kind': 'ship', 'label': 'obra', 'cost': {}})
+
+    def test_shipyard_is_the_least_loaded_colony(self):
+        capital, forja, porto = self.colonies[:3]
+        self.queue_works(capital, 3)
+        self.queue_works(forja, 1)
+        self.assertIs(self.faction.pick_shipyard(), porto)
+        self.assertTrue(self.faction.build_ship('scout', planet=porto))
+        self.assertEqual(len(porto.build_queue), 1)
+        self.assertEqual(len(capital.build_queue), 3)
+
+    def test_automatic_choice_avoids_the_capital(self):
+        capital = self.colonies[0]
+        self.queue_works(capital, 4)
+        self.assertTrue(self.faction.build_ship('scout'))
+        self.assertEqual(len(capital.build_queue), 4)
+        elsewhere = sum(
+            len(p.build_queue) for p in self.faction.colonies.values()
+            if p is not capital)
+        self.assertEqual(elsewhere, 1)
+
+    def test_unarmed_colonies_are_not_shipyards(self):
+        for planet in self.faction.colonies.values():
+            planet.can_build_ships = False
+        self.assertIsNone(self.faction.pick_shipyard())
+        self.assertFalse(self.faction.build_ship('scout'))
+
+    def test_full_queues_push_work_to_the_next_colony(self):
+        from graphics.star import MAX_BUILD_QUEUE
+        capital, forja = self.colonies[0], self.colonies[1]
+        self.queue_works(capital, MAX_BUILD_QUEUE)
+        self.assertIs(self.faction.pick_shipyard(), forja)
 
 
 if __name__ == "__main__":

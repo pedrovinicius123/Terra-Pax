@@ -70,22 +70,28 @@ class AIController(BaseController):
         if not f.scout_manager:
             return
         max_scouts = 3 + f.tech_tree['exploration']
-        if len(f.scout_manager.active_scouts) < max_scouts:
+        planned = len(f.scout_manager.active_scouts) + f.queued_ship_count(
+            'scout')
+        if planned < max_scouts:
             f.build_ship('scout')
 
     def _manage_fleet(self, state):
         f = self.faction
         warships = [s for s in f.ships.values() if isinstance(s, Warship)]
+        pending = sum(f.queued_ship_count(key) for key in (
+            'dreadnought', 'battleship', 'cruiser', 'destroyer', 'frigate',
+            'corvette'))
         at_war = bool(f.war_declarations)
         desired = int(1 + self.aggression * 4
                       + f.tech_tree['weapons'] + (3 if at_war else 0))
-        if len(warships) < desired:
-            for key in (
-                    'dreadnought', 'battleship', 'cruiser', 'destroyer',
-                    'frigate', 'corvette'):
-                if f.can_afford(DESIGNS[key]['cost']):
-                    f.build_ship(key)
-                    break
+        if len(warships) + pending >= desired:
+            return
+        for key in (
+                'dreadnought', 'battleship', 'cruiser', 'destroyer',
+                'frigate', 'corvette'):
+            if f.can_fund(DESIGNS[key]['cost']):
+                f.build_ship(key)
+                break
 
 
     def _manage_diplomacy(self, state):

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from typing import Tuple, Dict, List
-from queue import Queue, Empty
 import math
 import threading
 import time
@@ -96,6 +95,17 @@ HABITAT_POP_BONUS = 0.12     # +12% teto de população por habitat
 HABITAT_DEV_BONUS = 0.08     # +8% teto de desenvolvimento por habitat
 HABITAT_OUTPUT_BONUS = 0.05  # +5% produção por habitat
 
+# Requisito de cada colônia vem da sua própria produção: manter a base
+# industrial ativa queima insumos na proporção do que ela rende.
+MAINTENANCE_INTENSITY = {
+    'Energy': 0.10, 'Chemicals': 0.03, 'Electronics': 0.02, 'Alloys': 0.015,
+}
+RESERVE_YEARS = 2.0      # estoque-alvo: anos de consumo que a colônia quer ter
+STORAGE_FILL_TARGET = 0.10  # piso de enchimento dos armazéns
+SUPPLY_STRAIN_PENALTY = 0.35  # perda de produção quando falta insumo
+MAX_BUILD_QUEUE = 12     # obras enfileiradas por colônia
+BUILD_DELIVERY_YEARS = 2.0  # prazo em que uma carga precisa chegar para a obra
+
 
 def planet_label_for(planet_type: str) -> str:
     return {'terrestrial': 'mundo terrestre',
@@ -134,7 +144,6 @@ class Planet:
 
 
     def post_init(self):
-        self.const_queue = Queue()
         self.developement = 0.1
         self.can_build_ships = True
         self.lock = threading.Lock()
@@ -165,6 +174,7 @@ class Planet:
         self.habitats = 0
         self.habitat_building = False
         self.famine = 0.0
+        self.supply_strain = 0.0
         if self.planet_type == 'asteroid':
             self.storage_capacity['Minerals'] = 30_000
             self.storage_capacity['Alloys'] = 4_000
@@ -186,7 +196,7 @@ class Planet:
     def _compute_caps(self):
         """Teto de desenvolvimento e população por nível de expansão."""
         tier = min(getattr(self, 'terraform_level', 0), 5)
-        caps = [(3.0, 3_000), (7.0, 8_000), (14.0, 20_000), (25.0, 50_000), (50.0, 100_000), (75.0, 1_000_000)]
+        caps = [(3.0, 6_000), (7.0, 10_000), (14.0, 20_000), (25.0, 50_000), (50.0, 100_000), (75.0, 1_000_000)]
         max_dev, max_pop = caps[tier]
         dev_scale, pop_scale = TYPE_CAPACITY_SCALE.get(
             getattr(self, 'planet_type', 'terrestrial'), (1.0, 1.0))
@@ -301,6 +311,123 @@ class Planet:
 
     def population_demand(self) -> float:
         return POP_FOOD_PER_YEAR * max(0.0, self.population)
+
+    def maintenance_demand(self) -> dict:
+        """Insumos que a base industrial consome por ano, dados pela produção."""
+        output = self.annual_output() * self.focus_effects().get(
+            'output', 1.0)
+        return {resource: output * intensity
+                for resource, intensity in MAINTENANCE_INTENSITY.items()
+                if resource in self.planet_resources}
+
+    def consumption(self) -> dict:
+        """Requisito anual da colônia: manutenção industrial e alimento."""
+        demand = dict(self.maintenance_demand())
+        food = self.population_demand()
+        if food > 0.0:
+            demand['Food'] = demand.get('Food', 0.0) + food
+        return demand
+
+    def target_stock(self) -> dict:
+        """Estoque-alvo: anos de consumo, nunca abaixo do piso de armazém."""
+        targets = {}
+        for resource, amount in self.consumption().items():
+            reserve = amount * RESERVE_YEARS
+            cap = self.storage_capacity.get(resource, 0.0)
+            if math.isfinite(cap) and cap > 0.0:
+                reserve = min(
+                    cap, max(reserve, cap * STORAGE_FILL_TARGET))
+            targets[resource] = reserve
+        return targets
+
+    def build_requirement(self) -> dict:
+        """Recursos que as obras ainda na fila vão exigir neste mundo."""
+        total = {}
+        for task in self.build_queue:
+            for resource, amount in (task.get('cost') or {}).items():
+                if resource in self.planet_resources:
+                    total[resource] = total.get(resource, 0.0) + amount
+        return total
+
+    def blocked_need(self) -> dict:
+        """Falta das obras travadas, já descontando o que o mundo produz.
+
+        Medida pela maior obra parada, não pela fila inteira: o que a colônia
+        faz sozinha dentro do prazo não precisa chegar de outro lugar.
+        """
+        yearly = self.resource_output()
+        need = {}
+        for task in self.build_queue:
+            for resource, missing in self.task_shortfall(task).items():
+                gap = max(
+                    0.0,
+                    missing - yearly.get(resource, 0.0) * BUILD_DELIVERY_YEARS)
+                if gap > need.get(resource, 0.0):
+                    need[resource] = gap
+        return need
+
+    def import_need(self, inbound=None) -> dict:
+        """Quanto falta chegar para manter reservas e obras paradas."""
+        targets = self.target_stock()
+        yearly = self.resource_output()
+        needed = {
+            resource: max(
+                0.0,
+                target - self.planet_resources.get(resource, 0.0)
+                - yearly.get(resource, 0.0) * RESERVE_YEARS)
+            for resource, target in targets.items()}
+        for resource, gap in self.blocked_need().items():
+            needed[resource] = max(needed.get(resource, 0.0), gap)
+        for resource, incoming in (inbound or {}).items():
+            if resource in needed:
+                needed[resource] = max(
+                    0.0, needed[resource] - incoming)
+        return {resource: amount for resource, amount in needed.items()
+                if amount > 1e-6}
+
+    def export_surplus(self) -> dict:
+        """O que o mundo pode emprestar sem furar suas reservas nem suas obras."""
+        reserve = self.target_stock()
+        claim = self.build_requirement()
+        surplus = {}
+        for resource, stored in self.planet_resources.items():
+            keep = max(reserve.get(resource, 0.0), claim.get(resource, 0.0))
+            available = stored - keep
+            if available > 1e-6:
+                surplus[resource] = available
+        return surplus
+
+    def awaiting_resources(self) -> dict:
+        """Custo ainda não pago da primeira obra bloqueada da fila."""
+        for task in self.build_queue:
+            missing = self.task_shortfall(task)
+            if missing:
+                return {'label': task.get('label', 'obra'),
+                        'missing': missing,
+                        'since': float(task.get('queued_at', 0.0))}
+        return {}
+
+    def task_shortfall(self, task) -> dict:
+        """O que falta neste mundo para a obra poder começar."""
+        return {resource: amount - self.planet_resources.get(resource, 0.0)
+                for resource, amount in (task.get('cost') or {}).items()
+                if amount > self.planet_resources.get(resource, 0.0)}
+
+    def _consume_maintenance(self, step_scale: float):
+        """Queima os insumos da produção e mede o desabastecimento local."""
+        required = {resource: amount * step_scale
+                    for resource, amount in self.maintenance_demand().items()}
+        total = sum(required.values())
+        if total <= 0.0:
+            self.supply_strain = 0.0
+            return
+        unmet = 0.0
+        for resource, amount in required.items():
+            stored = self.planet_resources.get(resource, 0.0)
+            burnt = min(stored, amount)
+            self.planet_resources[resource] = stored - burnt
+            unmet += amount - burnt
+        self.supply_strain = min(1.0, unmet / total)
 
     def _advance_expansion(self, years: float, wonder_bonus: float = 1.0):
         """A colonização avança a terraformação; níveis sobem sozinhos."""
@@ -446,30 +573,35 @@ class Planet:
         return True
 
     def queue_task(self, task: dict) -> dict:
-        """Enfileira uma obra mantendo-a visível e cancelável no painel."""
+        """Enfileira uma obra; ela espera recursos, não é barrada por eles."""
         task.setdefault('id', f"{self.name}:{len(self.build_queue)}")
+        task.setdefault(
+            'queued_at',
+            getattr(getattr(self.faction, 'game_state', None), 'time', 0.0))
         self.build_queue.append(task)
-        self.const_queue.put(task)
         return task
 
     def queued_tasks(self):
         return list(self.build_queue)
 
+    def queue_is_full(self) -> bool:
+        return len(self.build_queue) >= MAX_BUILD_QUEUE
+
     def cancel_queued(self, task) -> bool:
-        """Cancela uma obra ainda na fila e devolve o custo pago."""
+        """Remove uma obra da fila; nada foi pago ainda, então nada devolve."""
         if task is None or task not in self.build_queue:
             return False
         self.build_queue.remove(task)
         task['cancelled'] = True
         if task.get('kind') == 'habitat':
             self.habitat_building = False
-        for resource, amount in (task.get('cost') or {}).items():
-            if resource not in self.planet_resources:
-                continue
-            cap = self.storage_capacity.get(resource, float('inf'))
-            self.planet_resources[resource] = min(
-                cap, self.planet_resources[resource] + amount)
         return True
+
+    def clear_build_queue(self):
+        """Esquece as obras pendentes — usado quando a colônia muda de dono."""
+        for task in self.build_queue:
+            task['cancelled'] = True
+        self.build_queue.clear()
 
     def building_progress(self) -> dict:
         """Obra em execução: rótulo e anos de jogo restantes."""
@@ -492,22 +624,33 @@ class Planet:
                 'kind': task.get('kind', 'ship')}
 
     def const(self):
-        try:
-            task = self.const_queue.get_nowait()
-        except Empty:
+        """Inicia a primeira obra da fila que o mundo já possa pagar.
+
+        O custo é pago aqui, não no enfileiramento: uma obra pedida a uma
+        colônia pobre entra na fila e espera a carga chegar de outra colônia.
+        """
+        if self.faction is None or not self.build_queue or self.queue_is_full():
             return
-        if self.faction is None:
-            self.const_queue.put(task)
+        for task in list(self.build_queue):
+            if task.get('cancelled'):
+                self.build_queue.remove(task)
+                continue
+            cost = task.get('cost') or {}
+            if not self.pay_cost(cost):
+                task['awaiting'] = self.task_shortfall(task)
+                continue
+            task.pop('awaiting', None)
+            self._start_task(task)
             return
-        if task.get('cancelled'):
-            return
-        task['started_at'] = getattr(
-            self.faction.game_state, 'time', 0.0)
-        self.building_task = task
+
+    def _start_task(self, task):
         try:
             self.build_queue.remove(task)
         except ValueError:
             pass
+        task['started_at'] = getattr(
+            self.faction.game_state, 'time', 0.0)
+        self.building_task = task
         if task.get('kind') == 'habitat':
             threading.Thread(target=self._build_habitat, args=(task,),
                              daemon=True).start()
@@ -607,10 +750,12 @@ class Planet:
         if self.faction is None:
             return
         effects = self.focus_effects()
+        strain = 1.0 - SUPPLY_STRAIN_PENALTY * getattr(
+            self, 'supply_strain', 0.0)
         prod = (
             self.production * self.developement * step_scale
             * self.faction.economy_multiplier * self._workforce_factor()
-            * effects.get('output', 1.0))
+            * effects.get('output', 1.0) * strain)
         yields = TYPE_RESOURCE_YIELDS.get(self.planet_type, {})
         game_state = getattr(self.faction, 'game_state', None)
         economic_mode = (
@@ -672,6 +817,7 @@ class Planet:
                 continue
             self.planet_resources[resource] += rate
 
+        self._consume_maintenance(step_scale)
 
     def remove_resource(self, resource_type: str, amount: float) -> bool:
         if resource_type not in self.planet_resources:

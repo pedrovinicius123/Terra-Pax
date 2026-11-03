@@ -1,13 +1,14 @@
-import networkx as nx
-import random
 import math
+import random
 
-from graphics.star import Planet, Star
+import networkx as nx
+
 from graphics.planet_generator import (
     generate_asteroid_suitability,
     generate_gas_giant_suitability,
     generate_suitability_profile,
 )
+from graphics.star import Planet, Star
 
 
 def generate_traditional_star_name():
@@ -47,10 +48,10 @@ def generate_traditional_star_name():
 def init_map(n_stars: int, sector_size: int, min_dist: int):
     stars = []
     used_star_names = set()
-    planet_letters = "bcdefghi"
+    planet_letters = "bcdefghijklmnop"
     star_positions = []
     minimum_system_spacing = (
-        0.4 * sector_size / math.sqrt(max(1, n_stars)))
+        0.8 * sector_size / math.sqrt(max(1, n_stars)))
     max_placement_attempts = max(100, n_stars * 20)
 
     for _ in range(n_stars):
@@ -69,8 +70,8 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
             )
 
         # Astro sizes stay small compared with inter-system distances.
-        star_r = random.uniform(0.003, 0.005) * sector_size
-        planet_r = random.uniform(0.0007, 0.0012) * sector_size
+        star_r = random.uniform(0.0008, 0.0013) * sector_size
+        planet_r = random.uniform(0.0005, 0.0008) * sector_size
 
         star_name = generate_traditional_star_name()
         base_name = star_name
@@ -84,16 +85,16 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
             name=star_name,
             total_resources=random.uniform(1e4, 1e6),
             radius=star_r,
-            green_zone=random.uniform(1, 2) * star_r,
+            green_zone=random.uniform(3, 7) * star_r,
             position=pos,
             planets=[],
         )
         stars.append(star)
 
         # Órbitas compactas, em camadas: base + k * passo
-        n_planets = random.randint(1, 8)
-        base_orbit = star_r * 1.5
-        orbit_step = star_r * 0.35
+        n_planets = random.randint(1, 15)
+        base_orbit = star_r * 2.5
+        orbit_step = star_r * 4.35
 
         def orbit_distance(k):
             return base_orbit + k * orbit_step
@@ -108,7 +109,7 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
             belt_k = random.choice(belt_candidates[:3])
 
         # Gigantes gasosos: fora do cinturão (ou da zona verde, sem ele).
-        gas_limit = star.green_zone * (2.2 if belt_k is not None else 1.6)
+        gas_limit = star.green_zone * (10.4 if belt_k is not None else 7.4)
 
         for k in range(n_planets):
             dist = orbit_distance(k)
@@ -147,7 +148,7 @@ def init_map(n_stars: int, sector_size: int, min_dist: int):
                 radius = planet_r * random.uniform(1.9, 2.6)
                 production = 0.9
             else:
-                suitability = generate_suitability_profile()
+                suitability = generate_suitability_profile(abs(star.green_zone-dist))
                 radius = planet_r * random.uniform(0.85, 1.15)
                 production = 1.0
 

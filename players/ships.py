@@ -489,20 +489,60 @@ class ColonyShip(Ship):
 
 
 class Transport(Ship):
-    RESOURCE_TYPES = (
-        'Food', 'Minerals', 'Energy', 'Electronics', 'Chemicals', 'Alloys',
-    )
+    """Nave civil que cumpre uma fila de missões.
+
+    Cada missão de carga leva vários recursos de uma colônia para outra; ao
+    descarregar, a nave assume a próxima tarefa da fila em vez de replanejar o
+    mundo inteiro do zero.
+    """
+
+    MAX_QUEUED_MISSIONS = 3
 
     def __init__(self, resource='Minerals', **kwargs):
         super().__init__(**kwargs)
         self.resource = resource
-        self.load = 0.0
+        self.cargo_hold = {}
         self.population_cargo = 0.0
-        self.mission_kind = None
+        self.mission = None
+        self.mission_queue = []
         self.source = None
         self.destination = None
         self._prefer_population = True
 
+    # ---------- porão ----------
+    @property
+    def used_cargo(self) -> float:
+        return sum(self.cargo_hold.values())
+
+    @property
+    def load(self) -> float:
+        """Total de recursos no porão (mantém painéis e leituras antigas)."""
+        return self.used_cargo
+
+    def cargo_summary(self) -> str:
+        parts = [f"{amount:.0f} {resource}"
+                 for resource, amount in sorted(self.cargo_hold.items())]
+        if self.population_cargo > 1e-6:
+            parts.append(f"{self.population_cargo:.0f} migrantes")
+        return ' · '.join(parts) if parts else 'vazio'
+
+    def scheduled_missions(self):
+        """Missões contratadas — a atual e as enfileiradas."""
+        missions = []
+        if self.mission is not None:
+            missions.append(self.mission)
+        missions.extend(self.mission_queue)
+        return missions
+
+    def _has_cargo(self) -> bool:
+        return self.used_cargo > 1e-6 or self.population_cargo > 1e-6
+
+    def _clear_mission(self):
+        self.mission = None
+        self.source = None
+        self.destination = None
+
+    # ---------- planejamento ----------
     def plan_population_transfer(self):
         best_route = None
         best_score = 0.0
@@ -550,26 +590,26 @@ class Transport(Ship):
                     best_route = source, destination, amount
         return best_route
 
-    def _plan_resource_transfer(self):
-        best_route = None
-        best_score = 0.0
+    def plan_missions(self):
+        """Fila de tarefas da nave: rotas de carga e migração de população."""
         logistics = self.faction.logistics_manager
-        for resource in self.RESOURCE_TYPES:
-            route = logistics.plan_transport_trip(resource, self.cargo)
-            if route is None:
-                continue
-            source, destination, amount = route
-            if not self._route_is_reachable(source, destination):
-                continue
-            capacity = destination.storage_capacity.get(resource, 0.0)
-            stored = destination.planet_resources.get(resource, 0.0)
-            deficit = max(0.0, 1.0 - stored / max(1.0, capacity))
-            priority = 1.5 if resource == 'Food' else 1.0
-            score = amount * deficit * priority
-            if score > best_score:
-                best_score = score
-                best_route = resource, source, destination, amount
-        return best_route
+        runs = logistics.plan_freight_runs(
+            self.cargo, count=self.MAX_QUEUED_MISSIONS,
+            origin=self.current_position, reachable=self._route_is_reachable)
+        missions = [{'kind': 'freight', 'source': run['source'],
+                     'destination': run['destination'], 'legs': run['legs'],
+                     'payload': run['payload']} for run in runs]
+        migration = self.plan_population_transfer()
+        if migration is not None:
+            source, destination, amount = migration
+            population = {'kind': 'population', 'source': source,
+                          'destination': destination, 'amount': amount,
+                          'legs': []}
+            if self._prefer_population and missions:
+                missions.insert(1, population)
+            else:
+                missions.insert(0, population)
+        return missions[:self.MAX_QUEUED_MISSIONS]
 
     def _route_is_reachable(self, source, destination):
         return (
@@ -581,6 +621,7 @@ class Transport(Ship):
                 destination.parent_star.name)
         )
 
+    # ---------- carga e entrega ----------
     def _load_population(self, source, amount):
         with source.lock:
             if (source.faction is not self.faction
@@ -589,7 +630,7 @@ class Transport(Ship):
             available = max(
                 0.0, source.population
                 - max(100.0, source.population * 0.1))
-            loaded = min(amount, available, self.cargo)
+            loaded = min(amount, available, self.cargo - self.used_cargo)
             if loaded <= 0:
                 return False
             source.population -= loaded
@@ -631,122 +672,89 @@ class Transport(Ship):
             return False
         return (yield from self.travel_path(path))
 
-    def _clear_mission(self, completed=False):
-        self.load = 0.0
-        self.population_cargo = 0.0
-        self.mission_kind = None
-        self.source = None
-        self.destination = None
-        if completed:
-            self._prefer_population = not self._prefer_population
+    # ---------- corrotinas ----------
+    def _collect_missions(self):
+        """Busca a primeira missão viável da fila e enche o porão."""
+        while self.running and self.alive:
+            if not self.mission_queue:
+                self.mission_queue = self.plan_missions()
+            if not self.mission_queue:
+                return False
+            mission = self.mission_queue.pop(0)
+            self.mission = mission
+            self.source = mission['source']
+            self.destination = mission['destination']
+            self.activity = (
+                "indo buscar migrantes"
+                if mission['kind'] == 'population'
+                else f"indo buscar carga para {mission['destination'].name}")
+            if not (yield from self._travel_to_planet(mission['source'])):
+                self._clear_mission()
+                return False
+            loaded = (
+                self._load_population(mission['source'], mission['amount'])
+                if mission['kind'] == 'population'
+                else self.faction.logistics_manager.load_cargo(
+                    self, mission['source'], mission['legs']) > 0.0)
+            if loaded:
+                return True
+            self._clear_mission()
+        return False
+
+    def _deliver_cargo(self):
+        """Descarrega no destino; sobra é redirecionada para outra colônia."""
+        logistics = self.faction.logistics_manager
+        destination = self.destination
+        if destination is None:
+            return None
+        if not (yield from self._travel_to_planet(destination)):
+            return False
+        delivered = (
+            self._deliver_population(destination)
+            if self.population_cargo > 1e-6 and self.mission is not None
+            and self.mission['kind'] == 'population'
+            else logistics.deliver_cargo(self, destination))
+        self.activity = (
+            f"entregue {delivered:.0f} em {destination.name}"
+            if delivered > 0 else f"{destination.name} sem espaço")
+        if not self._has_cargo():
+            return True
+        if self.population_cargo > 1e-6:
+            self.destination = self._find_population_destination(self.source)
+        else:
+            self.resource = max(
+                self.cargo_hold, key=self.cargo_hold.get,
+                default=self.resource)
+            self.destination = logistics.plan_hold_release(self)
+        return True
 
     def ai(self):
         while self.running and self.alive:
             if (yield from self._handle_order()):
                 continue
-            logistics = self.faction.logistics_manager
-            has_cargo = (
-                self.population_cargo > 1e-6
-                if self.mission_kind == 'population'
-                else self.load > 1e-6
-            )
-            if not has_cargo:
-                migration_route = self.plan_population_transfer()
-                resource_route = self._plan_resource_transfer()
-                if self._prefer_population:
-                    mission = (
-                        ('population', migration_route)
-                        if migration_route is not None
-                        else ('resource', resource_route)
-                    )
-                else:
-                    mission = (
-                        ('resource', resource_route)
-                        if resource_route is not None
-                        else ('population', migration_route)
-                    )
-                mission_kind, route = mission
-                if route is None:
-                    yield from self._wait_game_time(3)
-                    continue
-
-                if mission_kind == 'population':
-                    source, destination, amount = route
-                    self.mission_kind = 'population'
-                else:
-                    self.resource, source, destination, amount = route
-                    self.mission_kind = 'resource'
-                self.source = source
-                self.destination = destination
-                self.activity = (
-                    "indo buscar migrantes"
-                    if self.mission_kind == 'population'
-                    else f"indo buscar {self.resource}"
-                )
-                if not (yield from self._travel_to_planet(source)):
+            if not self._has_cargo():
+                if not (yield from self._collect_missions()):
                     if not self.running or not self.alive:
                         return
-                    self._clear_mission()
                     yield from self._wait_game_time(3)
                     continue
-                loaded = (
-                    self._load_population(source, amount)
-                    if self.mission_kind == 'population'
-                    else logistics.load_cargo(self, source, amount)
-                )
-                if not loaded:
-                    self._clear_mission()
-                    yield from self._wait_game_time(1)
-                    continue
-
-            destination = self.destination
-            if destination is None:
-                if self.mission_kind == 'population':
-                    destination = self._find_population_destination(
-                        self.source)
-                else:
-                    destination = logistics.plan_delivery(
-                        self.resource, self.load, origin=self.source)
-                if destination is None:
-                    yield from self._wait_game_time(3)
-                    continue
-                self.destination = destination
-
-            self.activity = (
-                "migrando população"
-                if self.mission_kind == 'population'
-                else f"transportando {self.resource}"
-            )
-            if not (yield from self._travel_to_planet(destination)):
-                if not self.running or not self.alive:
-                    return
-                self.destination = None
+                self.activity = f"transportando {self.cargo_summary()}"
+            delivered = yield from self._deliver_cargo()
+            if delivered is None:
+                self.mission_queue = []
                 yield from self._wait_game_time(3)
                 continue
-            delivered = (
-                self._deliver_population(destination)
-                if self.mission_kind == 'population'
-                else logistics.deliver_cargo(self, destination)
-            )
-            if delivered <= 0:
-                self.destination = None
-                yield from self._wait_game_time(1)
+            if not delivered:
+                if not self.running or not self.alive:
+                    return
+                yield from self._wait_game_time(3)
                 continue
-
-            remaining = (
-                self.population_cargo
-                if self.mission_kind == 'population'
-                else self.load
-            )
-            self.activity = (
-                f"migração de {delivered:.0f} habitantes concluída"
-                if self.mission_kind == 'population'
-                else f"entregue {delivered:.0f} {self.resource}"
-            )
-            if remaining <= 1e-6:
-                self._clear_mission(completed=True)
-            else:
-                self.destination = None
+            if not self._has_cargo():
+                mission = self.mission
+                self._clear_mission()
+                if (mission is not None
+                        and mission.get('kind') == 'population'):
+                    self._prefer_population = not self._prefer_population
             yield from self._wait_game_time(1)
 
 

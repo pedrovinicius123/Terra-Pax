@@ -1,7 +1,6 @@
 import threading
 import math
 
-from queue import Empty
 from enum import Enum
 from graphics.star import SIMULATION_STEP_YEARS
 from players.ships import Scout, ColonyShip, Transport, Warship
@@ -9,7 +8,7 @@ from logistics.modules.logistics_manager import LogisticsManager
 from players.fleets import FleetManager
 
 RESEARCH_SCALE = 1.0
-BASE_COLONIZATION_RANGE = 350.0
+BASE_COLONIZATION_RANGE = 1050.0
 COLONIZATION_RANGE_PER_FTL_LEVEL = 70.0
 
 # Custo base de um habitat orbital; escala com os já existentes no mundo.
@@ -327,6 +326,39 @@ class Faction:
     def can_afford(self, cost):
         return all(self.resources.get(r, 0) >= a for r, a in cost.items())
 
+    def empire_income(self) -> dict:
+        """Saldo anual do império: o que sobra depois do consumo das colônias."""
+        income = {}
+        for planet in self.colonies.values():
+            outputs = planet.resource_output()
+            demand = planet.consumption()
+            for resource, amount in outputs.items():
+                if resource in ('Research', 'Credits'):
+                    continue
+                income[resource] = (
+                    income.get(resource, 0.0) + amount
+                    - demand.get(resource, 0.0))
+        return {resource: max(0.0, amount)
+                for resource, amount in income.items()}
+
+    def can_fund(self, cost, horizon_years: float = 6.0) -> bool:
+        """Dá para pagar a obra hoje ou com o que o império produz no prazo?"""
+        income = self.empire_income()
+        return all(
+            self.resources.get(resource, 0.0)
+            + income.get(resource, 0.0) * horizon_years >= amount
+            for resource, amount in cost.items())
+
+    def queued_ship_count(self, design_key=None):
+        total = 0
+        for planet in self.colonies.values():
+            for task in planet.queued_tasks():
+                if task.get('kind') == 'habitat':
+                    continue
+                if design_key is None or task.get('design_key') == design_key:
+                    total += 1
+        return total
+
     def pay_cost(self, cost):
         if not self.can_afford(cost):
             return False
@@ -349,27 +381,53 @@ class Faction:
 
     def build_ship(self, design_key, planet=None,
                    target_planet=None, target_star=None):
+        """Enfileira a nave na colônia; o custo é pago quando a obra começa.
+
+        Escassez local não barra a obra: ela entra na fila e os transportes
+        trazem o que falta de outras colônias.
+        """
         if design_key not in DESIGNS:
             return False
         design = DESIGNS[design_key]
-        if planet is None:
-            planet = max(self.colonies.values(),
-                         key=lambda p: p.production * p.developement)
-        if not planet.can_afford(design['cost']):
+        if not self.colonies:
             return False
-        planet.pay_cost(design['cost'])
-        self._recompute_resources()
+        if planet is None:
+            planet = self.pick_shipyard(design)
+            if not planet:
+                return False
+
+        if planet is None or not planet.can_build_ships:
+            return False
+        if planet.queue_is_full():
+            return False
         task_id = self._next_ship_id()
         task = {'design_key': design_key,
                 'label': f"{design['display']} {task_id}",
                 'build_time': design['build_time'],
                 'cost': dict(design['cost']),
+                'kind': 'ship',
                 'id': task_id,
                 'planet': planet,
                 'target_planet': target_planet,
                 'target_star': target_star}
         planet.queue_task(task)
-        return True
+        return planet
+
+    def pick_shipyard(self, needed:dict):
+        resource_score = []
+        for col in self.colonies.values():
+            if not col.queue_is_full():
+                resources_available = 0
+
+                for k, v in needed['cost'].items():
+                    resources_available += col.planet_resources.get(k, 0) / v
+
+                resource_score.append((resources_available, len(col.build_queue), col))
+
+        if not resource_score:
+            return False
+            
+        return min(resource_score, key=lambda x:x[:2])[2]
 
     def spawn_ship(self, design_key, at_star=None):
         design = DESIGNS[design_key]
@@ -451,9 +509,7 @@ class Faction:
         if self.reserved_targets:
             return False
 
-        # 3. Checa recursos e alvo
-        if not self.can_afford(DESIGNS['colony']['cost']):
-            return False
+        # 3. Checa alvo; o custo da obra é pago quando ela puder começar
         target = self.find_best_colony_target(game_state)
         if not target:
             return False
@@ -483,7 +539,7 @@ class Faction:
                 and planet.faction is self
                 and planet.habitats < HABITAT_MAX_PER_PLANET
                 and not planet.habitat_building
-                and planet.can_afford(self.habitat_cost(planet)))
+                and not planet.queue_is_full())
 
     def build_habitat(self, planet=None):
         """Enfileira a construção de um habitat na colônia indicada."""
@@ -496,15 +552,12 @@ class Faction:
             planet = max(candidates, key=lambda p: p.population)
         if not self.can_build_habitat(planet):
             return False
-        cost = self.habitat_cost(planet)
-        planet.pay_cost(cost)
-        self._recompute_resources()
         planet.habitat_building = True
         planet.queue_task({
             'kind': 'habitat',
             'label': f"Habitat orbital de {planet.name}",
             'build_time': HABITAT_BUILD_TIME,
-            'cost': cost,
+            'cost': self.habitat_cost(planet),
             'faction': self,
             'id': f"HAB-{self.name[:3].upper()}-{planet.habitats + 1}",
         })
@@ -705,11 +758,7 @@ class Faction:
             planet.planet_resources[k] = 0.0
 
         # Limpa fila de construcao pendente
-        while True:
-            try:
-                planet.const_queue.get_nowait()
-            except Empty:
-                break
+        planet.clear_build_queue()
 
         # Notifica o estado global
         if self.game_state is not None:

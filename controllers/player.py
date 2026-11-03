@@ -73,6 +73,9 @@ class PlayerController(BaseController):
         self.faction.auto_habitat = not self.faction.auto_habitat
         return self.faction.auto_habitat
 
+    def pick_shipyard(self, design):
+        return self.faction.pick_shipyard(design)
+
     def declare_war(self, other):
         self.faction.update_diplomacy(other, DiplomacyStatus.WAR)
 
