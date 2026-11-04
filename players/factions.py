@@ -820,36 +820,18 @@ class Faction:
             return False
         self.adjust_relation(other, 10)
         return True
-    ## NOTE!!! THIS METHOD WILL BE OBSOLETE SOON!
-    def offer_treaty(self, other, treaty):
 
     def offer_treaty(self, other, treaty):
-        thresholds = {'non_aggression': 45, 'trade': 55}
+        thresholds = {'non_aggression': 45, 'trade': DiplomacyStatus.TRADE}
         if treaty not in thresholds or not self._can_negotiate(other):
             return False
         if self.has_treaty(other, treaty):
             if self.logistics_manager.overload_status().get("overloaded", False):
                 self._cancel_treaty(other, treaty)
-            return True
-        if self.get_relation(other) < thresholds[treaty]:
             return False
+        return self.get_relation(other) < thresholds[treaty]
+           
 
-        # Clear refusal history when a new treaty is successfully established
-        self.declined_peace_offers.discard(other.name)
-        other.declined_peace_offers.discard(self.name)
-
-        self.treaties.setdefault(other.name, set()).add(treaty)
-        other.treaties.setdefault(self.name, set()).add(treaty)
-        
-        # Ensure DiplomacyStatus is updated to reflect the treaty
-        if treaty == 'trade':
-            self.update_diplomacy(other, DiplomacyStatus.TRADE)
-        elif treaty == 'non_aggression':
-            # Non-aggression should at least move status to NEUTRAL if it was WAR
-            if self.diplomacy.get(other.name) == DiplomacyStatus.WAR:
-                self.update_diplomacy(other, DiplomacyStatus.NEUTRAL)
-                
-        return True
     def propose_trade_offer(self, other):
         if (other is self or self.eliminated or other.eliminated
                 or self.diplomacy.get(other.name) != DiplomacyStatus.WAR
@@ -881,7 +863,6 @@ class Faction:
             other.treaties.setdefault(self.name, set()).add('trade')
 
         elif not self.is_human and self.logistics_manager.overload_status().get('overloaded', False):
-            print("Recusado!")
             return False
 
         self.treaties.setdefault(other.name, set()).add('trade')

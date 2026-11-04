@@ -72,11 +72,11 @@ FACTION_TRAIT_ASSIGNMENTS = (
     ("military", "diplomacy"),
 )
 GALAXY_LAYOUTS = {
-    "tiny": (20, 3800, 260, TINY_GALAXY_FACTION_INDICES),
-    "compact": (30, 7600, 320, COMPACT_GALAXY_FACTION_INDICES),
-    "medium": (60, 14000, 440, None),
-    "large": (100, 30000, 500, None),
-    "giant": (160, 50000, 560, None),
+    "tiny": (20, 3800, 1260, TINY_GALAXY_FACTION_INDICES),
+    "compact": (30, 7600, 2320, COMPACT_GALAXY_FACTION_INDICES),
+    "medium": (60, 14000, 2440, None),
+    "large": (100, 30000, 2500, None),
+    "giant": (160, 50000, 5560, None),
 }
 
 

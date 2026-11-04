@@ -670,7 +670,8 @@ class Transport(Ship):
         path = self.find_path_to_star(planet.parent_star)
         if path is None:
             return False
-        return (yield from self.travel_path(path))
+        yield from self.travel_path(path)
+        return True
 
     # ---------- corrotinas ----------
     def _collect_missions(self):
